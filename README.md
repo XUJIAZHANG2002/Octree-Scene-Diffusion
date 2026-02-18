@@ -38,3 +38,11 @@ If you find this work useful, please consider citing:
       primaryClass={cs.CV},
       url={https://arxiv.org/abs/2509.16483}, 
 }
+```
+---
+
+## Acknowledgements
+
+This codebase is heavily inspired by and builds upon:
+- [OctFusion](https://arxiv.org/abs/2408.14732)
+- [SemCity](https://arxiv.org/abs/2403.07773)
