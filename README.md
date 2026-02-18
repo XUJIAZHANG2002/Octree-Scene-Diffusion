@@ -1,8 +1,8 @@
-# Octree Scene Diffusion
+# Octree Latent Diffusion for Semantic 3D Scene Generation and Completion
 
 Official implementation of:
 
-**Octree Scene Diffusion: Structured Latent Diffusion for Semantic 3D Scene Generation and Completion**  
+**Octree Latent Diffusion for Semantic 3D Scene Generation and Completion**  
 Accepted at **ICRA 2026**.
 
 ---
@@ -38,6 +38,30 @@ If you find this work useful, please consider citing:
       primaryClass={cs.CV},
       url={https://arxiv.org/abs/2509.16483}, 
 }
+```
+
+---
+## Installation 
+The enviroment builds upon [OctFusion](https://github.com/octree-nn/octfusion).
+
+1. Clone this repository
+```bash
+git clone https://github.com/XUJIAZHANG2002/Octree-Scene-Diffusion.git
+cd Octree-Scene-Diffusion
+```
+2. Create a `Conda` environment.
+```bash
+conda create -n octfusion python=3.11 -y && conda activate octfusion
+```
+
+3. Install PyTorch with Conda
+```bash
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+```
+
+4. Install other requirements.
+```bash
+pip3 install -r requirements.txt 
 ```
 ---
 
