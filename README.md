@@ -23,24 +23,6 @@ It leverages hierarchical octree representations to enable scalable and memory-e
 More details will be added with the full code release.
 
 ---
-
-## Citation
-
-If you find this work useful, please consider citing:
-
-```bibtex
-@misc{zhang2025octreelatentdiffusionsemantic,
-      title={Octree Latent Diffusion for Semantic 3D Scene Generation and Completion}, 
-      author={Xujia Zhang and Brendan Crowe and Christoffer Heckman},
-      year={2025},
-      eprint={2509.16483},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2509.16483}, 
-}
-```
-
----
 ## Installation 
 The enviroment builds upon [OctFusion](https://github.com/octree-nn/octfusion).
 
@@ -64,7 +46,21 @@ conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvi
 pip3 install -r requirements.txt 
 ```
 ---
+## Citation
 
+If you find this work useful, please consider citing:
+
+```bibtex
+@misc{zhang2025octreelatentdiffusionsemantic,
+      title={Octree Latent Diffusion for Semantic 3D Scene Generation and Completion}, 
+      author={Xujia Zhang and Brendan Crowe and Christoffer Heckman},
+      year={2025},
+      eprint={2509.16483},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2509.16483}, 
+}
+```
 ## Acknowledgements
 
 This codebase is heavily inspired by and builds upon:
