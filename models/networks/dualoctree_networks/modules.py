@@ -158,6 +158,64 @@ import torch.nn.functional as F
 #         x = x.view(-1, 256, 1, 1)         # [B, 256, 1, 1]
 #         x = self.upconv(x)               # [B, num_classes, 4, 4]
 #         return x
+# class SharedPatchEmbed(nn.Module):
+#     def __init__(self, num_classes, embed_dim, hidden_dim):
+#         super().__init__()
+#         self.embedding = nn.Embedding(num_classes, embed_dim)
+
+#         self.conv_proj = nn.Sequential(
+#             nn.Conv2d(embed_dim, 64, kernel_size=3, stride=1, padding=1),
+#             nn.ReLU(),
+#             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+#             nn.ReLU(),
+#             nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+#             nn.ReLU(),
+#         )
+
+#         self.to_latent = nn.Sequential(
+#             nn.Flatten(),
+#             nn.Linear(256, hidden_dim),
+#         )
+
+#     def forward(self, x):
+#         """
+#         x: [N, 4, 4] with values ∈ [0, num_classes)
+#         """
+#         x = self.embedding(x.long())         # [N, 4, 4, embed_dim]
+#         x = x.permute(0, 3, 1, 2)            # [N, embed_dim, 4, 4]
+#         x = self.conv_proj(x)                # [N, 256, 1, 1]
+#         x = self.to_latent(x)                # [N, hidden_dim]
+#         return x
+
+# class SharedPatchDecoder(nn.Module):
+#     def __init__(self, hidden_dim, embed_dim, num_classes):
+#         super().__init__()
+
+#         self.proj = nn.Sequential(
+#             nn.Linear(hidden_dim, 256),     # [B, 256]
+#             nn.ReLU(),
+#         )
+
+#         self.upconv = nn.Sequential(
+#             nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2),     # [B, 128, 2, 2]
+#             nn.ReLU(),
+#             nn.ConvTranspose2d(128, embed_dim, kernel_size=2, stride=2),  # [B, embed_dim, 4, 4]
+#             nn.ReLU(),
+#             nn.Conv2d(embed_dim, num_classes, kernel_size=1)           # [B, num_classes, 4, 4]
+#         )
+
+#     def forward(self, x):
+#         """
+#         x: [B, hidden_dim] → from latent
+#         return: [B, num_classes, 4, 4]
+#         """
+#         x = self.proj(x)                  # [B, 256]
+#         x = x.view(-1, 256, 1, 1)         # [B, 256, 1, 1]
+#         x = self.upconv(x)               # [B, num_classes, 4, 4]
+#         return x
+    
+
+
 class SharedPatchEmbed(nn.Module):
     def __init__(self, num_classes, embed_dim, hidden_dim):
         super().__init__()
@@ -181,27 +239,33 @@ class SharedPatchEmbed(nn.Module):
         """
         x: [N, 4, 4] with values ∈ [0, num_classes)
         """
-        x = self.embedding(x.long())         # [N, 4, 4, embed_dim]
-        x = x.permute(0, 3, 1, 2)            # [N, embed_dim, 4, 4]
-        x = self.conv_proj(x)                # [N, 256, 1, 1]
-        x = self.to_latent(x)                # [N, hidden_dim]
+        x = self.embedding(x.long())  # [N, 4, 4, embed_dim]
+        x = x.permute(0, 3, 1, 2)  # [N, embed_dim, 4, 4]
+        x = self.conv_proj(x)  # [N, 256, 1, 1]
+        x = self.to_latent(x)  # [N, hidden_dim]
         return x
+
 
 class SharedPatchDecoder(nn.Module):
     def __init__(self, hidden_dim, embed_dim, num_classes):
         super().__init__()
 
         self.proj = nn.Sequential(
-            nn.Linear(hidden_dim, 256),     # [B, 256]
+            nn.Linear(hidden_dim, 256),  # [B, 256]
             nn.ReLU(),
         )
 
+        # self.upconv = nn.Sequential(
+        #     nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2),     # [B, 128, 2, 2]
+        #     nn.ReLU(),
+        #     nn.ConvTranspose2d(128, embed_dim, kernel_size=2, stride=2),  # [B, embed_dim, 4, 4]
+        #     nn.ReLU(),
+        #     nn.Conv2d(embed_dim, num_classes, kernel_size=1)           # [B, num_classes, 4, 4]
+        # )
         self.upconv = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2),     # [B, 128, 2, 2]
+            nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2),  # [B, 128, 2, 2]
             nn.ReLU(),
-            nn.ConvTranspose2d(128, embed_dim, kernel_size=2, stride=2),  # [B, embed_dim, 4, 4]
-            nn.ReLU(),
-            nn.Conv2d(embed_dim, num_classes, kernel_size=1)           # [B, num_classes, 4, 4]
+            nn.Conv2d(128, num_classes, kernel_size=1),  # [B, num_classes, 2, 2]
         )
 
     def forward(self, x):
@@ -209,7 +273,7 @@ class SharedPatchDecoder(nn.Module):
         x: [B, hidden_dim] → from latent
         return: [B, num_classes, 4, 4]
         """
-        x = self.proj(x)                  # [B, 256]
-        x = x.view(-1, 256, 1, 1)         # [B, 256, 1, 1]
-        x = self.upconv(x)               # [B, num_classes, 4, 4]
+        x = self.proj(x)  # [B, 256]
+        x = x.view(-1, 256, 1, 1)  # [B, 256, 1, 1]
+        x = self.upconv(x)  # [B, num_classes, 4, 4]
         return x

@@ -13,7 +13,7 @@ from ocnn.nn import octree2voxel
 from ocnn.octree import Octree
 from torch.nn import init
 
-from . import dual_octree, modules, mpu
+from . import dual_octree, modules
 from .distributions import DiagonalGaussianDistribution
 
 
@@ -87,9 +87,7 @@ class GraphVAE(torch.nn.Module):
         # self.bottleneck = bottleneck
         self.latent_dim = latent_dim
         self.resblk_num = resblk_num
-        self.neural_mpu = mpu.NeuralMPU(
-            self.full_depth, self.depth_stop, self.depth_out
-        )
+
         self._setup_channels_and_resblks()
         n_edge_type, avg_degree = 7, 7
         self.dropout = 0.0
@@ -184,18 +182,11 @@ class GraphVAE(torch.nn.Module):
             ]
         )
         # self.sem_predict = self._make_predict_module(self.channels[depth], self.num_classes)# 这里的NUM_CLASSES是语义标签的分类数，仅在最深层做语义预测
-        # self.regress = torch.nn.ModuleList(
-        #     [
-        #         self._make_predict_module(
-        #             self.channels[d], 4
-        #         )  # 这里的4就是王老师说的，MPU里一个node里的4个特征分别代表法向量和偏移量
-        #         for d in range(depth_stop, depth + 1)
-        #     ]
-        # )
+
 
         self.patch_sem_predict = modules.SharedPatchDecoder(
             hidden_dim=self.channels[self.depth],  # latent dim of the node
-            embed_dim=64,                          # mid channels
+            embed_dim=64,          
             num_classes=self.num_classes
         )
         ae_channel_in = self.channels[self.depth_stop]
@@ -453,14 +444,4 @@ class GraphVAE(torch.nn.Module):
         # output = {"logits": out[0], "reg_voxs": out[1], "octree_out": out[2]}
         output = {"logits": out[0], "sem_voxs": out[1], "octree_out": out[2]}
         return output
-        if pos is not None:
-            output["mpus"] = self.neural_mpu(pos, out[1], out[2])
 
-        # create the mpu wrapper
-        def _neural_mpu(pos):
-            pred = self.neural_mpu(pos, out[1], out[2])
-            return pred[self.depth_out][0]
-
-        output["neural_mpu"] = _neural_mpu
-
-        return output

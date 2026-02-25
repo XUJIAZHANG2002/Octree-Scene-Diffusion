@@ -346,33 +346,25 @@ class DualOctree:
 
 
     def get_input_feature(self, all_leaf_nodes=True):
-        # the initial feature of leaf nodes in the layer self.depth
-        octree_feature = InputFeature(feature = "F", nempty=True)
+        octree_feature = InputFeature(feature="F", nempty=True)
         data = octree_feature(self.octree)
-        # print(data.shape, "datashape at leaf nodes")
-        # data shape is the finest depth of octree
         
-        # data = ocnn.octree_property(self.octree, 'feature', self.depth)
-        # data = data.squeeze(0).squeeze(-1).t()
-
-        # the initial feature of leaf nodes in other layers
         if all_leaf_nodes:
+            leaf_num = self.lnum[self.full_depth:self.depth].sum()
+            
+            # Match the dimensionality of 'data'
             if data.ndim == 3:
-                # new case: data shape [N, 4, 4]
-                leaf_num = self.lnum[self.full_depth:self.depth].sum()
-                zeros = torch.zeros((leaf_num, 2, 2), device=self.device, dtype=data.dtype)
+                # If data is [N, H, W], zeros must be [leaf_num, H, W]
+                h, w = data.shape[1], data.shape[2]
+                zeros = torch.zeros((leaf_num, h, w), device=self.device, dtype=data.dtype)
             else:
-                # fallback for legacy shape: [N, C]
+                # Standard [N, C] case
                 channel = data.shape[1]
-                leaf_num = self.lnum[self.full_depth:self.depth].sum()
                 zeros = torch.zeros((leaf_num, channel), device=self.device, dtype=data.dtype)
- 
 
-            # concat zero features with the initial features in layer depth
             data = torch.cat([zeros, data], dim=0)
-            # print(data.shape, "datashape with zeros padded on every leaf node at coarse levels")
+            
         return data
-    
     def get_input_semantic_feature(self):
         leaf_num = self.lnum[self.full_depth:self.depth].sum()
         coarse_feature = torch.zeros(leaf_num,device=self.device)
@@ -383,7 +375,8 @@ class DualOctree:
             mask = full_features != -1
             valid_vals = full_features[mask]
             n = valid_vals.numel()
-
+            print("n",n)
+            print("validval shape",valid_vals.shape)
             coarse_feature[offset:offset+n] = valid_vals
             offset += n
 
