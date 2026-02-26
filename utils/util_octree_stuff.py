@@ -169,3 +169,73 @@ def get_non_empty_mask(vox, patch_size=8):
     # check if any voxel in each patch is non-zero
     mask = (vox_reshaped != 0).any(dim=(-1, -2))           # [32, 32, 32]
     return mask
+
+def split2splitbig(split: torch.Tensor) -> torch.Tensor:
+    """
+    Expand an octant-coded grid into a dense grid with a singleton channel.
+
+    Input:
+        split: [B, 8, L, L, L]
+            Channels 0..7 map to (e/o) along (z, y, x) respectively.
+
+    Output:
+        split_big: [B, 1, 2L, 2L, 2L]
+    """
+    assert split.ndim == 5, f"Expected [B, 8, L, L, L], got {split.shape}"
+    B, C, L, H, W = split.shape
+    assert C == 8, f"Channel dimension must be 8, got {C}"
+
+    split_big = torch.full((B, 1, 2*L, 2*H, 2*W), -1, dtype=split.dtype, device=split.device)
+
+    # Work on the single output channel
+    sb = split_big[:, 0]
+
+    # Fill each octant
+    sb[:, 0::2, 0::2, 0::2] = split[:, 0]  # (e,e,e)
+    sb[:, 0::2, 0::2, 1::2] = split[:, 1]  # (e,e,o)
+    sb[:, 0::2, 1::2, 0::2] = split[:, 2]  # (e,o,e)
+    sb[:, 0::2, 1::2, 1::2] = split[:, 3]  # (e,o,o)
+    sb[:, 1::2, 0::2, 0::2] = split[:, 4]  # (o,e,e)
+    sb[:, 1::2, 0::2, 1::2] = split[:, 5]  # (o,e,o)
+    sb[:, 1::2, 1::2, 0::2] = split[:, 6]  # (o,o,e)
+    sb[:, 1::2, 1::2, 1::2] = split[:, 7]  # (o,o,o)
+
+    return split_big
+
+
+
+
+import torch
+
+def splitbig2split(split_big: torch.Tensor) -> torch.Tensor:
+    """
+    Collapse a dense voxel grid back into an octant-coded tensor.
+
+    Accepts:
+        [B, 1, 2L, 2L, 2L]  or  [B, 2L, 2L, 2L]
+    Returns:
+        [B, 8, L, L, L]
+    """
+    if split_big.ndim == 5:
+        B, C, D, H, W = split_big.shape
+        assert C == 1, f"Expected channel=1, got {C}"
+        sb = split_big[:, 0]
+    elif split_big.ndim == 4:
+        B, D, H, W = split_big.shape
+        sb = split_big
+    else:
+        raise AssertionError(f"Expected [B,1,2L,2L,2L] or [B,2L,2L,2L], got {split_big.shape}")
+
+    assert D % 2 == 0 and H % 2 == 0 and W % 2 == 0, "Spatial dims must be even"
+    L = D // 2
+
+    out = torch.empty((B, 8, L, L, L), dtype=sb.dtype, device=sb.device)
+    out[:, 0] = sb[:, 0::2, 0::2, 0::2]  # (e,e,e)
+    out[:, 1] = sb[:, 0::2, 0::2, 1::2]  # (e,e,o)
+    out[:, 2] = sb[:, 0::2, 1::2, 0::2]  # (e,o,e)
+    out[:, 3] = sb[:, 0::2, 1::2, 1::2]  # (e,o,o)
+    out[:, 4] = sb[:, 1::2, 0::2, 0::2]  # (o,e,e)
+    out[:, 5] = sb[:, 1::2, 0::2, 1::2]  # (o,e,o)
+    out[:, 6] = sb[:, 1::2, 1::2, 0::2]  # (o,o,e)
+    out[:, 7] = sb[:, 1::2, 1::2, 1::2]  # (o,o,o)
+    return out
