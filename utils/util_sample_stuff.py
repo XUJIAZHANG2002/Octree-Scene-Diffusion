@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import math
+import numpy as np
 @torch.no_grad()
 def ddim_sample_structure_logsnr_cosine(z_T, model, S=50, predict_mode="x0"):
     """
@@ -149,7 +150,18 @@ def alpha_cosine_log_snr(t, s: float = 0.008, eps: float = 1e-5):
 # === LogSNR to alpha/sigma ===
 def log_snr_to_alpha_sigma(log_snr):
     return torch.sqrt(torch.sigmoid(log_snr)), torch.sqrt(torch.sigmoid(-log_snr))
-
+# === Continuous Cosine Log-SNR Schedule ===
+def log_snr_schedule_cosine(t, scale=1.0, eps=1e-5):
+    """
+    t: [0,1] continuous
+    scale: controls sharpness of cosine decay
+    """
+    # Cosine noise schedule (similar to Imagen/DDPM++)
+    # logsnr = log(alpha^2 / sigma^2)
+    # Here we map t -> logsnr via cosine^2
+    f = torch.cos((t + eps) / (1 + eps) * (np.pi / 2)) ** 2
+    logsnr = torch.log(f) - torch.log(1 - f)
+    return scale * logsnr
 # === Sampling timesteps: for inference (not training) ===
 def get_sampling_timesteps(batch, device, steps):
     times = torch.linspace(1., 0., steps + 1, device=device)

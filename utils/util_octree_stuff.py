@@ -378,7 +378,7 @@ import torch.nn.functional as F
 
 
 
-def compute_semantic_loss_clean(
+def compute_semantic_loss(
     sem_voxs, octree, voxel_tensor, class_weights, depth=6
 ):
     device = voxel_tensor.device
