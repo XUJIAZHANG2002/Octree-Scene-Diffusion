@@ -1,0 +1,15 @@
+vae_ref:
+  checkpoint: "saved_model/vae_model_5.pt"
+
+unet:
+  image_size: 16
+  model_channels: 64
+  lr_model_channels: 128
+  num_res_blocks: [1, 1, 1]
+  channel_mult: [1, 2]
+
+training:
+  lr: 1.0e-4
+  t_max: 600
+  save_path: "saved_model/unet_sem_diffusion.pt"
+  data_dir: "data/patches_128x128x64_s16"

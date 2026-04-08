@@ -1,0 +1,11 @@
+model:
+  z_channels: 2
+  base_channels: 32
+  in_channels: 1
+
+training:
+  lr: 1.0e-4
+  batch_size: 4
+  epochs: 200
+  checkpoint_path: "saved_model/structure_vae.pt"
+  data_dir: "data/split_outputs" 

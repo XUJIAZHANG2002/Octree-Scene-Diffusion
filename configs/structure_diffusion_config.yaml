@@ -1,0 +1,14 @@
+vae_ref:
+  checkpoint: "saved_model/structure_vae.pt"
+
+unet:
+  in_ch: 2             # Must match VoxelVAE z_channels
+  base_ch: 64          # Matches your default
+  time_emb_dim: 128    # Matches your default
+
+training:
+  lr: 1.0e-4
+  batch_size: 4
+  t_max: 1000           
+  save_path: "saved_model/structure_diffusion.pt"
+  data_dir: "data/split_outputs"

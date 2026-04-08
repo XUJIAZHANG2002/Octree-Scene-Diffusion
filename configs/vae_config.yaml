@@ -1,0 +1,15 @@
+model:
+  depth_in: 6
+  full_depth: 3
+  latent_dim: 16
+  total_classes: 92
+  resblk_num: 2
+  channel_in: 32
+  nout: 2
+
+training:
+  batch_size: 1
+  lr: 1.0e-4
+  epochs: 100
+  save_path: "saved_model/vae_model_5.pt"
+  data_dir: "data/patches_128x128x64_s16"
