@@ -25,6 +25,8 @@ It leverages hierarchical octree representations to enable scalable and memory-e
 More details will be added with the full code release.
 
 ---
+## Dataset
+(TODO)
 ## Installation 
 The enviroment builds upon [OctFusion](https://github.com/octree-nn/octfusion).
 
@@ -48,6 +50,37 @@ conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvi
 pip3 install -r requirements.txt 
 ```
 ---
+
+## Training
+🚀 Training
+The pipeline consists of four models trained in two stages (Structure and Semantics). You can run the full pipeline using the provided script:
+Bash
+
+```bash 
+scripts/train_full_pipeline.sh
+```
+Alternatively, you can train each component individually:
+
+Stage A: Structural Prior
+
+Structure VAE: Learns the global occupancy latent space.
+```python
+python train_structure_vae.py
+```
+Structure Diffusion: Generates structural latents.
+```python
+python train_structure_diffusion.py
+```
+Stage B: Semantic Refinement
+
+Semantic VAE: Learns the octree-based semantic features.
+```python
+python train_vae.py
+```
+Semantic Diffusion: Generates semantic labels conditioned on the structure.
+```python
+python train_sem_diffusion.py
+```
 ## Citation
 
 If you find this work useful, please consider citing:

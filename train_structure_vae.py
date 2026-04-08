@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import tqdm
 import os
-from models.networks.structure_vae import VoxelVAE
+from models.structure_networks.structure_vae import VoxelVAE
 from dataset.split_dataset import get_split_dataloader
 from utils.config_loader import load_config
 
