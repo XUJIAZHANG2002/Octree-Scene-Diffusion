@@ -52,35 +52,28 @@ pip3 install -r requirements.txt
 ---
 
 ## Training
-🚀 Training
-The pipeline consists of four models trained in two stages (Structure and Semantics). You can run the full pipeline using the provided script:
-Bash
 
-```bash 
-scripts/train_full_pipeline.sh
-```
-Alternatively, you can train each component individually:
+The pipeline consists of four models trained in two stages (Structure and Semantics). 
 
-Stage A: Structural Prior
+**Stage A: Structural Generation**
 
-Structure VAE: Learns the global occupancy latent space.
-```python
-python train_structure_vae.py
-```
-Structure Diffusion: Generates structural latents.
-```python
-python train_structure_diffusion.py
-```
-Stage B: Semantic Refinement
+1. **Structure VAE**: Learns the occupancy latent space.
+   ```bash
+   python main.py --stage str_vae
+2. **Structure Diffusion**: Generates structural latents.
+      ```python
+      python main.py --stage str_diff
+      ```
+**Stage B: Semantic Generation**
 
-Semantic VAE: Learns the octree-based semantic features.
-```python
-python train_vae.py
-```
-Semantic Diffusion: Generates semantic labels conditioned on the structure.
-```python
-python train_sem_diffusion.py
-```
+1. **Semantic VAE**: Learns the octree-based semantic features.
+      ```python
+      python main.py --stage sem_vae
+      ```
+2. **Semantic Diffusion**: Generates semantic labels conditioned on the structure.
+      ```python
+      python main.py --stage sem_diff
+      ```
 ## Citation
 
 If you find this work useful, please consider citing:
