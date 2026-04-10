@@ -74,6 +74,9 @@ The pipeline consists of four models trained in two stages (Structure and Semant
       ```python
       python main.py --stage sem_diff
       ```
+
+## Inference
+TODO
 ## Citation
 
 If you find this work useful, please consider citing:
