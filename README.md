@@ -1,8 +1,8 @@
-# Octree Latent Diffusion for Semantic 3D Scene Generation and Completion
+# Octree Diffusion for Semantic Scene Generation and Completion
 
 Official implementation of:
 
-**Octree Latent Diffusion for Semantic 3D Scene Generation and Completion**  
+**Octree Diffusion for Semantic Scene Generation and Completion**  
 Accepted at **ICRA 2026**.
 
 ---
