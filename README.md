@@ -61,6 +61,8 @@ pip3 install -r requirements.txt
 
 The pipeline consists of four models trained in two stages (Structure and Semantics). 
 
+ In this project, we used patch_size = 2 for indoor scene and patch_size = 4 for ourdoor scenes. Please adjust as needed in configs/sem_vae_config.yaml.
+
 **Stage A: Structural Generation**
 
 1. **Structure VAE**: Learns the occupancy latent space.

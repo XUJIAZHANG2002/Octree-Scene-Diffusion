@@ -6,7 +6,7 @@ model:
   resblk_num: 2
   channel_in: 32
   nout: 2
-
+  patch_size: 2 # We used patch_size = 2 for indoor scenes, and patch_size = 4 for outdoor scenes. Adjust as needed.
 training:
   batch_size: 1
   lr: 1.0e-4

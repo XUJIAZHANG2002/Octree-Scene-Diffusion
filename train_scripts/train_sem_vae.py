@@ -15,7 +15,7 @@ from utils.config_loader import load_config
 
 def train():
     # Load and split config for cleaner access
-    full_config = load_config("configs/vae_config.yaml")
+    full_config = load_config("configs/sem_vae_config.yaml")
     m_cfg = full_config["model"]
     t_cfg = full_config["training"]
 
@@ -34,7 +34,7 @@ def train():
         num_classes=m_cfg["total_classes"],
         resblk_num=m_cfg["resblk_num"],
     ).cuda()
-
+    patch_size = m_cfg["patch_size"]
     optimizer = torch.optim.Adam(vae.parameters(), lr=t_cfg["lr"])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_cfg["epochs"])
 
@@ -47,10 +47,10 @@ def train():
             vox = vox.cuda().long()
             
             # Preprocessing
-            non_empty_mask = get_non_empty_mask(vox[0], 2)
+            non_empty_mask = get_non_empty_mask(vox[0], patch_size)
             points = voxel_grid_to_points(non_empty_mask)
             octree = points2octree(points, depth=m_cfg["depth_in"], full_depth=m_cfg["full_depth"]).cuda()
-            patch_feat = voxel_to_patch(vox, patch_size=2)
+            patch_feat = voxel_to_patch(vox, patch_size)
             assign_octree_patch_features(patch_feat[0], octree, m_cfg["depth_in"])
             
             # Forward Pass
