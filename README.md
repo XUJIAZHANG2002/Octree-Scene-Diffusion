@@ -26,7 +26,13 @@ More details will be added with the full code release.
 
 ---
 ## Dataset
-(TODO)
+
+Download the Velodyne point clouds (80 GB) from the official KITTI website:
+* https://www.semantic-kitti.org/dataset.html
+
+For indoor scene generation, we tested our model on Replica.
+
+* https://github.com/facebookresearch/Replica-Dataset
 ## Installation 
 The enviroment builds upon [OctFusion](https://github.com/octree-nn/octfusion).
 
