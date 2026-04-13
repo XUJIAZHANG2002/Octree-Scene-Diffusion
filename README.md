@@ -84,16 +84,23 @@ The pipeline consists of four models trained in two stages (Structure and Semant
       ```
 
 ## Inference
-TODO
+
+**Generation**
+
+**Semantic Scene Compeletion**
+
+**Scene Extension**
+
+
 ## Citation
 
 If you find this work useful, please consider citing:
 
 ```bibtex
-@misc{zhang2025octreelatentdiffusionsemantic,
-      title={Octree Latent Diffusion for Semantic 3D Scene Generation and Completion}, 
+@misc{zhang2026octreediffusionsemanticscene,
+      title={Octree Diffusion for Semantic Scene Generation and Completion}, 
       author={Xujia Zhang and Brendan Crowe and Christoffer Heckman},
-      year={2025},
+      year={2026},
       eprint={2509.16483},
       archivePrefix={arXiv},
       primaryClass={cs.CV},

@@ -1,7 +1,7 @@
 ## Datasets
 Datasets should have the following structure.
 
-The triplane folder is created by `scripts/save_triplane.py` after `scripts/train_ae_main.py`.
+
 
 ### SemanticKITTI
 You can download SemanticKITTI datasets from [here](http://www.semantic-kitti.org/assets/data_odometry_voxels_all.zip).
@@ -33,21 +33,3 @@ If you want to do semantic scene completion refinement, place the `.label` file 
             .
             └── 10/
         
-### CarlaSC
-You can download CarlaSC Cartesian datasets from [here](https://umich-curly.github.io/CarlaSC.github.io/download/).
-
-The structure differs slightly from the original CarlaSC dataset to align with the SemanticKITTI dataset.
-The `voxels` folder was originally the `evaluation` folder, which contains the GT for semantic scene completion.
-    
-    /carla/
-        └── sequences/
-            ├── Town01_Heavy/
-            |   ├── voxels/
-            │   |     ├ 000000.label
-            │   |     ├ 000000.bin
-            │   └── triplane/
-            │         ├ 000000.npy
-            ├── Town01_Medium/
-            .
-            .
-            └── Town10_Light/

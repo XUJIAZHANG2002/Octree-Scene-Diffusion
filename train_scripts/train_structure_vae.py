@@ -8,7 +8,7 @@ from utils.config_loader import load_config
 
 def train():
     # Load configuration
-    config = load_config("configs/structure_config.yaml")
+    config = load_config("configs/structure_vae_config.yaml")
     m_cfg = config["model"]
     t_cfg = config["training"]
 
@@ -32,36 +32,30 @@ def train():
     for epoch in range(t_cfg["epochs"]):
         model.train()
         pbar = tqdm.tqdm(loader, desc=f"Epoch {epoch}")
-        epoch_recon_loss = 0
-        epoch_kl_loss = 0
-
         for vox, _ in pbar:
             vox = vox.to(device) # Shape: [B, 1, 32, 32, 32] or [B, 1, 16, 16, 16]
-            
+            # print(vox.mean())
             # Forward Pass
             logits, mu, logvar, z = model(vox)
             
             # Loss Calculation
             # 1. Reconstruction: Binary Cross Entropy with Logits
             # vox is treated as targets (0 or 1)
-            recon_loss = F.binary_cross_entropy_with_logits(logits, vox, reduction='sum')
+            recon_loss = F.mse_loss(logits, vox)
             
             # 2. KL Divergence for VAE Bottleneck
             kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
             
             # Scale loss by batch size
-            total_loss = (recon_loss + kl_loss) / vox.size(0)
+            total_loss = (recon_loss + 0.1*kl_loss) 
 
             # Optimization
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
-
-            epoch_recon_loss += recon_loss.item() / vox.size(0)
-            epoch_kl_loss += kl_loss.item() / vox.size(0)
             pbar.set_postfix({
-                "recon": f"{recon_loss.item()/vox.size(0):.2f}", 
-                "kl": f"{kl_loss.item()/vox.size(0):.2f}"
+                "recon": f"{recon_loss.item():.2f}", 
+                "kl": f"{kl_loss.item():.2f}"
             })
 
         # Save checkpoint

@@ -13,7 +13,7 @@ from utils.config_loader import load_config
 
 def train():
     # Load both configs
-    v_cfg = load_config("configs/vae_config.yaml")["model"]
+    v_cfg = load_config("configs/sem_vae_config.yaml")["model"]
     d_cfg = load_config("configs/sem_diffusion_config.yaml")
 
     # 1. Load Pre-trained VAE (Eval Mode)

@@ -20,7 +20,7 @@ def main():
     script_map = {
         "str_vae": "train_scripts/train_structure_vae.py",
         "str_diff": "train_scripts/train_structure_diffusion.py",
-        "sem_vae": "train_scripts/train_vae.py",
+        "sem_vae": "train_scripts/train_sem_vae.py",
         "sem_diff": "train_scripts/train_sem_diffusion.py"
     }
 
@@ -28,7 +28,7 @@ def main():
     config_map = {
         "str_vae": "configs/structure_vae_config.yaml",
         "str_diff": "configs/structure_diffusion_config.yaml",
-        "sem_vae": "configs/vae.yaml",
+        "sem_vae": "configs/sem_vae_config.yaml",
         "sem_diff": "configs/sem_diffusion_config.yaml"
     }
 

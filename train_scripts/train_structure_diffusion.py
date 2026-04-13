@@ -14,8 +14,8 @@ from utils.util_sample_stuff import log_snr_schedule_cosine, log_snr_to_alpha_si
 
 def train():
     # Load configurations
-    full_s_cfg = load_config("configs/structure_config.yaml")
-    s_cfg = full_s_cfg["model"]
+    full_vae_cfg = load_config("configs/structure_vae_config.yaml")
+    vae_cfg = full_vae_cfg["model"]
     
     full_d_cfg = load_config("configs/structure_diffusion_config.yaml")
     d_cfg = full_d_cfg["unet"]
@@ -25,8 +25,8 @@ def train():
 
     # 1. Load Frozen Structural VAE
     vae = VoxelVAE(
-        z_channels=s_cfg["z_channels"], 
-        base=s_cfg["base_channels"]
+        z_channels=vae_cfg["z_channels"], 
+        base=vae_cfg["base_channels"]
     ).to(device)
     vae.load_state_dict(torch.load(full_d_cfg["vae_ref"]["checkpoint"], weights_only=True))
     vae.eval()
@@ -86,7 +86,7 @@ def train():
             pbar.set_postfix({"mse": f"{loss.item():.4f}"})
 
         # Save checkpoint periodically
-        if epoch % 50 == 0 or epoch == t_cfg["t_max"] - 1:
+        if epoch % 5 == 0 or epoch == t_cfg["t_max"] - 1:
             os.makedirs(os.path.dirname(t_cfg["save_path"]), exist_ok=True)
             torch.save(model.state_dict(), t_cfg["save_path"])
 

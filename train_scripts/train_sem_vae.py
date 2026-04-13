@@ -28,7 +28,7 @@ def train():
         channel_in=m_cfg["channel_in"],
         nout=m_cfg["nout"],
         full_depth=m_cfg["full_depth"],
-        depth_stop=m_cfg["depth_in"],
+        depth_stop=m_cfg["depth_stop"],
         depth_out=m_cfg["depth_in"],
         latent_dim=m_cfg["latent_dim"],
         num_classes=m_cfg["total_classes"],
@@ -72,6 +72,7 @@ def train():
 
             pbar.set_postfix({
                 "loss": f"{total_loss.item():.3f}", 
+                "lr": f"{optimizer.param_groups[0]['lr']:.2e}",
                 "acc": f"{sem_loss_dict.get('sem_accu_6', 0.0):.3f}"
             })
 

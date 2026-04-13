@@ -10,6 +10,6 @@ unet:
 
 training:
   lr: 1.0e-4
-  t_max: 600
+  t_max: 20
   save_path: "saved_model/unet_sem_diffusion.pt"
   data_dir: "data/patches_128x128x64_s16"
