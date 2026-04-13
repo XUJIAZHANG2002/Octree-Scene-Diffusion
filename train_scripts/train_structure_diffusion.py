@@ -11,7 +11,7 @@ from models.structure_networks.unet_3d import StructureUNet # Ensure your provid
 from dataset.split_dataset import get_split_dataloader
 from utils.config_loader import load_config
 from utils.util_sample_stuff import log_snr_schedule_cosine, log_snr_to_alpha_sigma
-
+from utils.util_visual_stuff import *
 def train():
     # Load configurations
     full_vae_cfg = load_config("configs/structure_vae_config.yaml")
@@ -52,15 +52,19 @@ def train():
         
         for vox, _ in pbar:
             vox = vox.to(device) # Expected shape [B, 1, 32, 32, 32]
-            
+        
+            # vox_clone = vox.clone()
+            # vox_clone[vox_clone > 0] = 1.0 # Binarize if not already binary, ensure it's float for VAE
+            # vox_clone[vox_clone <= 0] = 0.0
+            # visualize_kitti_instance(vox_clone[0][0])
             # Get Latents from VAE
             with torch.no_grad():
                 mu, _ = vae.encode(vox)
                 z_clean = mu # Shape [B, in_ch, 32, 32, 32]
-            
+            # print(z_clean.mean(),z_clean.std())
             # Diffusion Process
             # t must be a 1D tensor of shape [B] for your SinusoidalPosEmb
-            t = torch.rand(vox.size(0), device=device)
+            t = torch.rand(1, device=device)
             
             logsnr_t = log_snr_schedule_cosine(t)
             alpha_t, sigma_t = log_snr_to_alpha_sigma(logsnr_t)
@@ -76,7 +80,7 @@ def train():
             # Note: your forward(x, t) handles the time embedding internally
             pred_x0 = model(z_noisy, t)
             
-            loss = torch.nn.functional.mse_loss(pred_x0, z_clean)
+            loss = torch.nn.functional.mse_loss(pred_x0, z_clean, reduction='sum')
             
             # Optimization
             optimizer.zero_grad()

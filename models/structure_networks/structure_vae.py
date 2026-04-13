@@ -62,3 +62,4 @@ class VoxelVAE(nn.Module):
         z = self.reparameterize(mu, logvar)
         logits = self.decode(z)
         return logits, mu, logvar, z
+

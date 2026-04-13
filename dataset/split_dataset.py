@@ -20,7 +20,13 @@ class SplitDataset(Dataset):
             
             if split_tensor.dim() == 5: 
                 split_tensor = split_tensor.squeeze(0)
-                
+            p = torch.randint(0, 4, (1,)).item()
+            if p == 1:
+                split_tensor = torch.flip(split_tensor, dims=[1])   # flip H
+            elif p == 2:
+                split_tensor = torch.flip(split_tensor, dims=[2])   # flip W
+            elif p == 3:
+                split_tensor = torch.flip(split_tensor, dims=[1, 2])  # flip both
             return split_tensor.float(), 0
 
 def get_split_dataloader(data_dir, batch_size=1, shuffle=True):

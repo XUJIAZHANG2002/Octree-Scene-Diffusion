@@ -1,5 +1,5 @@
 model:
-  z_channels: 4
+  z_channels: 2
   base_channels: 128
   in_channels: 1
 
