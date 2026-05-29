@@ -4,7 +4,7 @@ Official implementation of:
 
 **Octree Diffusion for Semantic Scene Generation and Completion**  
 Accepted at **ICRA 2026**.
-
+[arxiv link](https://arxiv.org/abs/2509.16483)
 ---
 
 ## 🚧 Status
@@ -20,6 +20,7 @@ The full training and inference pipeline will be released soon.
 ## Overview
 
 Octree Scene Diffusion is a structured generative framework for semantic 3D scene generation and completion.  
+
 It leverages hierarchical octree representations to enable scalable and memory-efficient diffusion modeling of large 3D environments.
 
 More details will be added with the full code release.
