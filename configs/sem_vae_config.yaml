@@ -12,5 +12,11 @@ training:
   batch_size: 1
   lr: 1.0e-4
   epochs: 20
+  # none | inv_sqrt | enet | inv. Round 1 trained with "none" (uniform).
+  # Weights come from dataset/compute_class_weights.py, computed on the "loss"
+  # basis (only voxels inside occupied octree nodes, which is all the semantic
+  # loss ever sees) with class 0 included.
+  class_weights: inv_sqrt
+  class_weights_file: "data/replica_class_counts.pt"
   save_path: "saved_model/vae_model_5.pt"
   data_dir: "data/patches_128x128x64_s16"

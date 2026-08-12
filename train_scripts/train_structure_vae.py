@@ -58,10 +58,9 @@ def train():
             })
 
         # Save checkpoint
-        if epoch % 10 == 0:
-            os.makedirs(os.path.dirname(t_cfg["checkpoint_path"]), exist_ok=True)
-            torch.save(model.state_dict(), t_cfg["checkpoint_path"])
-            print(f" Saved checkpoint to {t_cfg['checkpoint_path']}")
+        os.makedirs(os.path.dirname(t_cfg["checkpoint_path"]), exist_ok=True)
+        torch.save(model.state_dict(), t_cfg["checkpoint_path"])
+        print(f" Saved checkpoint to {t_cfg['checkpoint_path']}")
 @torch.no_grad()
 def inference():
     # 1. Load configuration
@@ -117,5 +116,4 @@ def inference():
 
     return logits
 if __name__ == "__main__":
-    # train()
-    inference()
+    train()

@@ -2,3 +2,9 @@ data/
 saved_model/
 semantic_vae_diffusion.ipynb
 structure_vae_diffusion.ipynb
+logs/
+out/
+__pycache__/
+*.pyc
+*.egg-info/
+*.zip

@@ -12,6 +12,7 @@ from utils.util_octree_stuff import (
 )
 from loss.octree_losses import compute_semantic_loss, compute_octree_loss
 from utils.config_loader import load_config
+from utils.class_weights import load_class_weights
 
 def train():
     # Load and split config for cleaner access
@@ -38,6 +39,12 @@ def train():
     optimizer = torch.optim.Adam(vae.parameters(), lr=t_cfg["lr"])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_cfg["epochs"])
 
+    class_weights = load_class_weights(
+        t_cfg.get("class_weights", "none"),
+        t_cfg.get("class_weights_file", "data/replica_class_counts.pt"),
+        m_cfg["total_classes"],
+    ).cuda()
+
     # 3. Training Loop
     for epoch in range(t_cfg["epochs"]):
         vae.train()
@@ -58,8 +65,8 @@ def train():
             
             # Loss Calculation
             sem_loss_dict = compute_semantic_loss(
-                output['sem_voxs'], output['octree_out'], vox, 
-                torch.ones(m_cfg["total_classes"]).cuda()
+                output['sem_voxs'], output['octree_out'], vox,
+                class_weights
             )
             oct_loss_dict = compute_octree_loss(output['logits'], octree)
             

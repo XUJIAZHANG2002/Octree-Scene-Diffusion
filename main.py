@@ -39,9 +39,15 @@ def main():
     print(f"📜 Script: {target_script}")
     print(f"⚙️  Config: {target_config}\n" + "-"*30)
 
-    # Execute the training script
+    # Execute the training script from the repo root so `models`, `utils`, ...
+    # resolve regardless of where the launcher was invoked from.
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    env = os.environ.copy()
+    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+
     try:
-        subprocess.run([sys.executable, target_script, "--config", target_config], check=True)
+        subprocess.run([sys.executable, target_script, "--config", target_config],
+                       check=True, cwd=repo_root, env=env)
     except subprocess.CalledProcessError as e:
         print(f"❌ Training failed for {args.stage}")
         sys.exit(1)

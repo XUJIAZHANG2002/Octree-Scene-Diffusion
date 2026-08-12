@@ -5,8 +5,10 @@ from models.networks.diffusion_networks.graph_unet_hr import UNet3DModel
 from models.networks.dualoctree_networks.graph_sem_vae import GraphVAE
 from utils.util_sample_stuff import log_snr_schedule_cosine, log_snr_to_alpha_sigma
 from dataset.voxel_dataset import get_dataloader
+from utils.ema import EMA, lr_at
+from utils.latent_scale import resolve_latent_scale
 from utils.util_octree_stuff import (
-    get_non_empty_mask, voxel_grid_to_points, points2octree, 
+    get_non_empty_mask, voxel_grid_to_points, points2octree,
     voxel_to_patch, assign_octree_patch_features
 )
 from utils.config_loader import load_config
@@ -15,6 +17,7 @@ def train():
     # Load both configs
     v_cfg = load_config("configs/sem_vae_config.yaml")["model"]
     d_cfg = load_config("configs/sem_diffusion_config.yaml")
+    t_cfg = d_cfg["training"]
 
     # 1. Load Pre-trained VAE (Eval Mode)
     vae = GraphVAE(
@@ -44,49 +47,89 @@ def train():
         channel_mult=d_cfg["unet"]["channel_mult"],
     ).cuda()
 
-    optimizer = torch.optim.AdamW(unet_model.parameters(), lr=d_cfg["training"]["lr"])
-    loader = get_dataloader(d_cfg["training"]["data_dir"], batch_size=1)
+    optimizer = torch.optim.AdamW(unet_model.parameters(), lr=t_cfg["lr"])
+    loader = get_dataloader(t_cfg["data_dir"], batch_size=1)
+    patch_size = v_cfg["patch_size"]
+
+    def encode(vox):
+        """Voxel labels -> (octree latents, dual octree)."""
+        non_empty_mask = get_non_empty_mask(vox[0], patch_size)
+        points = voxel_grid_to_points(non_empty_mask)
+        octree = points2octree(points, depth=v_cfg["depth_in"],
+                               full_depth=v_cfg["full_depth"]).cuda()
+        patch_feat = voxel_to_patch(vox, patch_size)
+        assign_octree_patch_features(patch_feat[0], octree, v_cfg["depth_in"])
+        _, mu, doctree = vae.extract_code(octree)
+        return mu.cuda(), doctree
+
+    # The noise schedule assumes ~unit-variance x0, so rescale the VAE latents.
+    @torch.no_grad()
+    def measure_std():
+        chunks = []
+        for i, (vox, _) in enumerate(loader):
+            mu, _ = encode(vox.cuda().long())
+            chunks.append(mu.flatten().cpu())
+            if i >= 40:
+                break
+        return torch.cat(chunks).std().item()
+
+    latent_scale = resolve_latent_scale(
+        t_cfg.get("latent_scale", 1.0), measure_std,
+        os.path.splitext(t_cfg["save_path"])[0] + "_meta.yaml", "semantic")
+
+    ema = EMA(unet_model, decay=t_cfg["ema_decay"])
+    accum = t_cfg["accum_steps"]
+    total_steps = t_cfg["t_max"] * len(loader) // accum
+    step = 0
+
+    print(f"{len(loader)} samples/epoch x {t_cfg['t_max']} epochs, "
+          f"accum {accum} -> {total_steps} optimiser steps")
 
     # 3. Training Loop
-    for epoch in range(d_cfg["training"]["t_max"]):
+    optimizer.zero_grad()
+    for epoch in range(t_cfg["t_max"]):
         unet_model.train()
         pbar = tqdm.tqdm(loader, desc=f"Epoch {epoch}")
 
-        for vox, _ in pbar:
+        for i, (vox, _) in enumerate(pbar):
             vox = vox.cuda().long()
-            
+
             # Use VAE to get latents
             with torch.no_grad():
-                non_empty_mask = get_non_empty_mask(vox[0], 2)
-                points = voxel_grid_to_points(non_empty_mask)
-                octree = points2octree(points, depth=v_cfg["depth_in"], full_depth=v_cfg["full_depth"]).cuda()
-                patch_feat = voxel_to_patch(vox, patch_size=2)
-                assign_octree_patch_features(patch_feat[0], octree, v_cfg["depth_in"])
-                
-                _, mu, doctree = vae.extract_code(octree)
-                z_clean = mu.cuda()
+                mu, doctree = encode(vox)
+                z_clean = mu * latent_scale
 
             # Diffusion Step
             t_cont = torch.rand(1, device=z_clean.device)
             logsnr_t = log_snr_schedule_cosine(t_cont)
             alpha_t, sigma_t = log_snr_to_alpha_sigma(logsnr_t)
-            
+
             noise = torch.randn_like(z_clean)
             z_noisy = alpha_t * z_clean + sigma_t * noise
 
             pred_x0 = unet_model(z_noisy, doctree=doctree, timesteps=t_cont)
             loss = torch.nn.functional.mse_loss(pred_x0, z_clean)
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(unet_model.parameters(), 1.0)
-            optimizer.step()
+            (loss / accum).backward()
 
-            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+            # The octree build forces batch 1, so accumulate to get a usable
+            # effective batch before stepping.
+            if (i + 1) % accum == 0:
+                for g in optimizer.param_groups:
+                    g["lr"] = lr_at(step, t_cfg["lr"], total_steps, t_cfg["warmup_steps"])
+                torch.nn.utils.clip_grad_norm_(unet_model.parameters(), t_cfg["grad_clip"])
+                optimizer.step()
+                optimizer.zero_grad()
+                ema.update(unet_model)
+                step += 1
 
-        if epoch % 10 == 0:
-            os.makedirs(os.path.dirname(d_cfg["training"]["save_path"]), exist_ok=True)
-            torch.save(unet_model.state_dict(), d_cfg["training"]["save_path"])
+            pbar.set_postfix({"loss": f"{loss.item():.4f}",
+                              "lr": f"{optimizer.param_groups[0]['lr']:.2e}"})
+
+        # EMA weights are the ones to sample from; raw kept for inspection.
+        os.makedirs(os.path.dirname(t_cfg["save_path"]), exist_ok=True)
+        torch.save(ema.state_dict(), t_cfg["save_path"])
+        torch.save(unet_model.state_dict(), t_cfg["save_path"].replace(".pt", "_raw.pt"))
 
 if __name__ == "__main__":
     train()

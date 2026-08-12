@@ -45,9 +45,10 @@ class VoxelPatchDataset(Dataset):
         labels = torch.rot90(labels, k, dims=[1, 2])
         return labels
 
-def get_dataloader(patch_root, batch_size=1, shuffle=True):
+def get_dataloader(patch_root, batch_size=1, shuffle=True, num_workers=4):
     dataset = VoxelPatchDataset(patch_root, transform=True)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+                        num_workers=num_workers)
     return loader
 
 
