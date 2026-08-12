@@ -358,9 +358,11 @@ class DualOctree:
         # the initial feature of leaf nodes in other layers
         if all_leaf_nodes:
             if data.ndim == 3:
-                # new case: data shape [N, 4, 4]
+                # patch features: [N, P, P]. Infer P rather than assuming 2 — outdoor
+                # uses 4x4 patches and hardcoding 2 silently pads the wrong shape.
+                h, w = data.shape[1], data.shape[2]
                 leaf_num = self.lnum[self.full_depth:self.depth].sum()
-                zeros = torch.zeros((leaf_num, 2, 2), device=self.device, dtype=data.dtype)
+                zeros = torch.zeros((leaf_num, h, w), device=self.device, dtype=data.dtype)
             else:
                 # fallback for legacy shape: [N, C]
                 channel = data.shape[1]

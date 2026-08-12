@@ -50,30 +50,37 @@ def points2octree(points,depth=4, full_depth=2):
 
 
 
-def reconstruct_voxel_from_patch(sem_voxs, octree, depth, shape=(1, 128, 128, 64)):
+def reconstruct_voxel_from_patch(sem_voxs, octree, depth, shape=(1, 128, 128, 64),
+                                 patch_size=None):
+    '''
+    Paint per-node patch predictions back onto a dense voxel grid.
+
+    Each node at `depth` owns a patch_size x patch_size tile in XY and a single
+    voxel in Z. `patch_size` is inferred from the logits when not given; pass it
+    explicitly to assert the geometry you expect (2 indoor, 4 outdoor).
+    '''
     B, H, W, D = shape
     device = sem_voxs[depth].device
     logits = sem_voxs[depth]
-    
+
     # 1. Get coordinates directly (the "enlightened" way)
     x, y, z, b = octree.xyzb(depth, nempty=False)
     x, y, z = x.long(), y.long(), z.long()
 
     # 2. Get predictions and handle the patch
-    # Assuming sem_voxs[depth] is [N, C, 2, 2] or [N, C, 4, 4]
-    # We take the argmax first to save memory
-    preds = logits.argmax(dim=1) # [N, 2, 2]
+    # sem_voxs[depth] is [N, C, P, P]. Take argmax first to save memory.
+    preds = logits.argmax(dim=1)  # [N, P, P]
     h_p, w_p = preds.shape[1], preds.shape[2]
-    
-    # 3. Vectorized coordinate expansion
-    # Replicating your scale-by-2 logic for XY
+    if patch_size is not None and (h_p, w_p) != (patch_size, patch_size):
+        raise ValueError(
+            f"patch_size={patch_size} but the decoder produced {h_p}x{w_p} patches")
+
+    # 3. Vectorized coordinate expansion — the node stride in XY is the patch size
     off_x = torch.arange(h_p, device=device)
     off_y = torch.arange(w_p, device=device)
-    
-    # Calculate global grid coordinates using broadcasting
-    # (x*2 + offset)
-    grid_x = (x.view(-1, 1, 1) * 2 + off_x.view(1, -1, 1)).expand(-1, h_p, w_p)
-    grid_y = (y.view(-1, 1, 1) * 2 + off_y.view(1, 1, -1)).expand(-1, h_p, w_p)
+
+    grid_x = (x.view(-1, 1, 1) * h_p + off_x.view(1, -1, 1)).expand(-1, h_p, w_p)
+    grid_y = (y.view(-1, 1, 1) * w_p + off_y.view(1, 1, -1)).expand(-1, h_p, w_p)
     grid_z = z.view(-1, 1, 1).expand(-1, h_p, w_p)
 
     # 4. Paint the voxel grid

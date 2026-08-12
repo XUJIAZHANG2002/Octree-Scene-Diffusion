@@ -44,25 +44,27 @@ def compute_semantic_loss(
     x, y, z, b = x.long(), y.long(), z.long(), b.long()
 
     # === Step 2: Handle the Patch logic ===
-    # Replicating your old logic: 2x2 offsets in XY
-    off_x = torch.tensor([0, 0, 1, 1], device=device)
-    off_y = torch.tensor([0, 1, 0, 1], device=device)
+    # Each node owns a PxP tile in XY and one voxel in Z. P comes from the
+    # decoder output (2 indoor, 4 outdoor) rather than being assumed.
+    P = H
+    ppn = P * P                                   # voxels per node
+    off_x = torch.arange(P, device=device).repeat_interleave(P)
+    off_y = torch.arange(P, device=device).repeat(P)
 
-    # Calculate target indices: [N, 4]
-    # We use broadcasting to create the N*4 coordinates
-    target_x = (x.view(-1, 1) * 2 + off_x.view(1, -1)).reshape(-1)
-    target_y = (y.view(-1, 1) * 2 + off_y.view(1, -1)).reshape(-1)
-    
-    # z and b just need to be repeated to match the 4 points per node
-    target_z = z.repeat_interleave(4)
-    target_b = b.repeat_interleave(4)
+    # Calculate target indices: [N, P*P] flattened
+    target_x = (x.view(-1, 1) * P + off_x.view(1, -1)).reshape(-1)
+    target_y = (y.view(-1, 1) * P + off_y.view(1, -1)).reshape(-1)
+
+    # z and b repeated to match the P*P points per node
+    target_z = z.repeat_interleave(ppn)
+    target_b = b.repeat_interleave(ppn)
 
     # === Step 3: Extract Labels ===
     # voxel_tensor is [B, H, W, D]
     gt_labels = voxel_tensor[target_b, target_x, target_y, target_z].long()
 
-    # Match logits to the 2x2 area (first 2x2 of the 4x4 patch)
-    pred_logits = logits[:, :, :2, :2].permute(0, 2, 3, 1).reshape(-1, C)
+    # logits are [N, C, P, P]; flatten to match the target ordering above
+    pred_logits = logits.permute(0, 2, 3, 1).reshape(-1, C)
 
     # === Step 4: Loss ===
     mask = gt_labels != -1

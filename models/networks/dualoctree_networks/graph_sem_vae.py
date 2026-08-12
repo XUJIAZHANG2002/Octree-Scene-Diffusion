@@ -70,7 +70,8 @@ class GraphVAE(torch.nn.Module):
         resblk_num=3,
  
         latent_dim=3,
-        num_classes=21
+        num_classes=21,
+        patch_size=2,
     ):
         # super().__init__(depth, channel_in, nout, full_depth, depth_stop, depth_out, use_checkpoint, resblk_type, bottleneck,resblk_num)
         # this is to make the encoder and decoder symmetric
@@ -93,6 +94,10 @@ class GraphVAE(torch.nn.Module):
         self.dropout = 0.0
         n_edge_type, avg_degree = 7, 7
         self.num_classes = num_classes
+        # 2 for indoor (Replica), 4 for outdoor (SemanticKITTI). Only the patch
+        # decoder's parameter shapes depend on this, but a checkpoint is only
+        # loadable by a model built for the size it was trained with.
+        self.patch_size = patch_size
         ## added 6.23 2025
         # self.embedding = torch.nn.Embedding(num_embeddings=self.num_classes, embedding_dim=channel_in)
         
@@ -186,8 +191,9 @@ class GraphVAE(torch.nn.Module):
 
         self.patch_sem_predict = modules.SharedPatchDecoder(
             hidden_dim=self.channels[self.depth],  # latent dim of the node
-            embed_dim=64,          
-            num_classes=self.num_classes
+            embed_dim=64,
+            num_classes=self.num_classes,
+            patch_size=self.patch_size,
         )
         ae_channel_in = self.channels[self.depth_stop]
 
