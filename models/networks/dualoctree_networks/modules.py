@@ -13,7 +13,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 # import torch_geometric.nn
 
-from .utils.scatter import scatter_mean
+from ..diffusion_networks.utils.scatter import scatter_mean
 from ocnn.octree import key2xyz, xyz2key
 
 from ocnn.octree import Octree
