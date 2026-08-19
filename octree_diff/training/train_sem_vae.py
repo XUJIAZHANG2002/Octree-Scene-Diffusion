@@ -1,22 +1,17 @@
 import torch
 import tqdm
 import os
-from octree_diff.models.semantic.graph_sem_vae import GraphVAE
+from octree_diff.octree.build import build_semantic_octree
+from octree_diff.models.factory import build_semantic_vae
 from octree_diff.data.voxel_dataset import get_dataloader
-from octree_diff.octree.util_octree_stuff import (
-    get_non_empty_mask, 
-    voxel_grid_to_points, 
-    points2octree, 
-    voxel_to_patch, 
-    assign_octree_patch_features
-)
 from octree_diff.training.losses import compute_semantic_loss, compute_octree_loss
-from octree_diff.config import load_config
+from octree_diff.config import load_stage
 from octree_diff.training.class_weights import load_class_weights
 
-def train():
+def train(config_dir=None, device=None):
     # Load and split config for cleaner access
-    full_config = load_config("configs/sem_vae_config.yaml")
+    full_config, _ = load_stage("sem_vae", config_dir)
+    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     m_cfg = full_config["model"]
     t_cfg = full_config["training"]
 
@@ -24,17 +19,7 @@ def train():
     loader = get_dataloader(t_cfg["data_dir"], batch_size=t_cfg["batch_size"])
 
     # 2. Initialize Model using m_cfg
-    vae = GraphVAE(
-        depth=m_cfg["depth_in"],
-        channel_in=m_cfg["channel_in"],
-        nout=m_cfg["nout"],
-        full_depth=m_cfg["full_depth"],
-        depth_stop=m_cfg["depth_stop"],
-        depth_out=m_cfg["depth_in"],
-        latent_dim=m_cfg["latent_dim"],
-        num_classes=m_cfg["total_classes"],
-        resblk_num=m_cfg["resblk_num"],
-    ).cuda()
+    vae = build_semantic_vae(m_cfg, device)
     patch_size = m_cfg["patch_size"]
     optimizer = torch.optim.Adam(vae.parameters(), lr=t_cfg["lr"])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_cfg["epochs"])
@@ -43,7 +28,7 @@ def train():
         t_cfg.get("class_weights", "none"),
         t_cfg.get("class_weights_file", "data/replica_class_counts.pt"),
         m_cfg["total_classes"],
-    ).cuda()
+    ).to(device)
 
     # 3. Training Loop
     for epoch in range(t_cfg["epochs"]):
@@ -51,14 +36,11 @@ def train():
         pbar = tqdm.tqdm(loader, desc=f"Epoch {epoch}")
         
         for vox, _ in pbar:
-            vox = vox.cuda().long()
+            vox = vox.to(device).long()
             
             # Preprocessing
-            non_empty_mask = get_non_empty_mask(vox[0], patch_size)
-            points = voxel_grid_to_points(non_empty_mask)
-            octree = points2octree(points, depth=m_cfg["depth_in"], full_depth=m_cfg["full_depth"]).cuda()
-            patch_feat = voxel_to_patch(vox, patch_size)
-            assign_octree_patch_features(patch_feat[0], octree, m_cfg["depth_in"])
+            octree = build_semantic_octree(vox, patch_size, m_cfg["depth_in"],
+                                           m_cfg["full_depth"], device)
             
             # Forward Pass
             output = vae(octree, octree_out=octree, update_octree=False)
@@ -86,8 +68,8 @@ def train():
         scheduler.step()
         
         # Save checkpoint
-        os.makedirs(os.path.dirname(t_cfg["save_path"]), exist_ok=True)
-        torch.save(vae.state_dict(), t_cfg["save_path"])
+        os.makedirs(os.path.dirname(t_cfg["checkpoint_path"]), exist_ok=True)
+        torch.save(vae.state_dict(), t_cfg["checkpoint_path"])
 
 if __name__ == "__main__":
     train()

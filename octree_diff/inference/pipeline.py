@@ -33,7 +33,7 @@ from octree_diff.models.semantic.dual_octree import DualOctree
 from octree_diff.models.semantic.graph_sem_vae import GraphVAE
 from octree_diff.models.structure.structure_vae import VoxelVAE
 from octree_diff.models.structure.unet_3d import StructureUNet
-from octree_diff.config import load_config
+from octree_diff.config import CONFIG_DIR, load_config
 from octree_diff.training.latent_scale import load_latent_scale
 from octree_diff.diffusion.sampling import (
     ddim_inpaint_dense, ddim_inpaint_graph, ddim_sample_dense, ddim_sample_graph,
@@ -48,10 +48,16 @@ from octree_diff.octree.util_octree_stuff import (
 # Indoor geometry. A [128,128,64] label patch reduces to a cubic [64,64,64]
 # occupancy mask at patch_size 2, so none of the z-padding / cropping that runs
 # through the outdoor notebooks applies here.
-GRID = (128, 128, 64)
-PATCH_SIZE = 2
-DEPTH = 6
-OCTREE_FULL_DEPTH = 4     # for the split representation
+#
+# patch_size and depth are read from the semantic VAE config rather than hardcoded:
+# the README tells users to set patch_size 4 for outdoor, and while these were
+# literals that instruction silently did nothing. IndoorPipeline re-checks them
+# against the config it actually loads, so a mismatch is an error, not a wrong result.
+_GEOM = load_config("configs/sem_vae_config.yaml")["model"]
+PATCH_SIZE = _GEOM["patch_size"]
+DEPTH = _GEOM["depth_in"]
+GRID = (128, 128, 64)     # label patch shape produced by the Replica data prep
+OCTREE_FULL_DEPTH = 4     # split representation; unrelated to the VAE's full_depth
 SPLIT_DEPTH = 4
 
 
@@ -170,13 +176,24 @@ class IndoorPipeline:
     run must not require the semantic diffusion checkpoint to exist yet.
     """
 
-    def __init__(self, device="cuda"):
+    def __init__(self, device="cuda", config_dir=None):
         self.device = torch.device(device)
 
-        self.str_vae_cfg = load_config("configs/structure_vae_config.yaml")
-        self.str_diff_cfg = load_config("configs/structure_diffusion_config.yaml")
-        self.sem_vae_cfg = load_config("configs/sem_vae_config.yaml")
-        self.sem_diff_cfg = load_config("configs/sem_diffusion_config.yaml")
+        d = config_dir or CONFIG_DIR
+        self.str_vae_cfg = load_config(os.path.join(d, "structure_vae_config.yaml"))
+        self.str_diff_cfg = load_config(os.path.join(d, "structure_diffusion_config.yaml"))
+        self.sem_vae_cfg = load_config(os.path.join(d, "sem_vae_config.yaml"))
+        self.sem_diff_cfg = load_config(os.path.join(d, "sem_diffusion_config.yaml"))
+
+        # The voxel<->octree helpers above close over the module-level geometry, so a
+        # config that disagrees with it would be silently ignored. Fail instead.
+        m = self.sem_vae_cfg["model"]
+        if (m["patch_size"], m["depth_in"]) != (PATCH_SIZE, DEPTH):
+            raise ValueError(
+                f"config patch_size/depth ({m['patch_size']}, {m['depth_in']}) differ from "
+                f"the geometry this pipeline was built for ({PATCH_SIZE}, {DEPTH}). "
+                f"The indoor pipeline is specialised to patch_size 2; outdoor uses the "
+                f"KITTI notebooks, not this class.")
 
         self.latent_dim = self.sem_vae_cfg["model"]["latent_dim"]
         self.str_z_ch = self.str_vae_cfg["model"]["z_channels"]
@@ -187,15 +204,15 @@ class IndoorPipeline:
 
         self.paths = {
             "structure_vae": self.str_vae_cfg["training"]["checkpoint_path"],
-            "structure_diffusion": self.str_diff_cfg["training"]["save_path"],
-            "semantic_vae": self.sem_vae_cfg["training"]["save_path"],
-            "semantic_diffusion": self.sem_diff_cfg["training"]["save_path"],
+            "structure_diffusion": self.str_diff_cfg["training"]["checkpoint_path"],
+            "semantic_vae": self.sem_vae_cfg["training"]["checkpoint_path"],
+            "semantic_diffusion": self.sem_diff_cfg["training"]["checkpoint_path"],
         }
         self._cache = {}
 
     @staticmethod
     def _meta(diff_cfg):
-        return os.path.splitext(diff_cfg["training"]["save_path"])[0] + "_meta.yaml"
+        return os.path.splitext(diff_cfg["training"]["checkpoint_path"])[0] + "_meta.yaml"
 
     def _load(self, name, build, ckpt):
         if name not in self._cache:
@@ -222,22 +239,22 @@ class IndoorPipeline:
     def str_unet(self):
         u = self.str_diff_cfg["unet"]
         return self._load("structure_diffusion",
-                          lambda: StructureUNet(in_ch=u["in_ch"], base_ch=u["base_ch"],
+                          lambda: StructureUNet(in_ch=u["in_channels"], base_ch=u["base_ch"],
                                                 time_emb_dim=u["time_emb_dim"]),
-                          self.str_diff_cfg["training"]["save_path"])
+                          self.str_diff_cfg["training"]["checkpoint_path"])
 
     @property
     def sem_vae(self):
         m = self.sem_vae_cfg["model"]
         return self._load("semantic_vae",
                           lambda: GraphVAE(
-                              depth=m["depth_in"], channel_in=m["channel_in"],
+                              depth=m["depth_in"], channel_in=m["in_channels"],
                               nout=m["nout"], full_depth=m["full_depth"],
                               depth_stop=m["depth_stop"], depth_out=m["depth_in"],
                               latent_dim=m["latent_dim"],
                               num_classes=m["total_classes"],
                               resblk_num=m["resblk_num"]),
-                          self.sem_vae_cfg["training"]["save_path"])
+                          self.sem_vae_cfg["training"]["checkpoint_path"])
 
     @property
     def sem_unet(self):
@@ -251,7 +268,7 @@ class IndoorPipeline:
                               out_channels=m["latent_dim"],
                               num_res_blocks=u["num_res_blocks"],
                               channel_mult=u["channel_mult"]),
-                          self.sem_diff_cfg["training"]["save_path"])
+                          self.sem_diff_cfg["training"]["checkpoint_path"])
 
     # -- structure ---------------------------------------------------------
 
@@ -441,7 +458,8 @@ def main():
     p.add_argument("--input", help="inpaint/outpaint: [128,128,64] int label tensor")
     p.add_argument("--known-mask", help="inpaint: [128,128,64] bool tensor, True = observed")
     p.add_argument("--steps-out", type=int, default=4, help="outpaint: extension steps")
-    p.add_argument("--num_samples", type=int, default=1)
+    p.add_argument("--num-samples", "--num_samples", type=int, default=1,
+                   dest="num_samples")
     p.add_argument("--steps", type=int, default=100, help="DDIM steps")
     p.add_argument("--eta", type=float, default=0.0, help="0 = deterministic DDIM")
     p.add_argument("--repaint-resample", type=int, default=1,

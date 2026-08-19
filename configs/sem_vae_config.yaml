@@ -5,7 +5,7 @@ model:
   latent_dim: 16
   total_classes: 92
   resblk_num: 2
-  channel_in: 32
+  in_channels: 32
   nout: 2
   patch_size: 2 # We used patch_size = 2 for indoor scenes, and patch_size = 4 for outdoor scenes. Adjust as needed.
 training:
@@ -13,10 +13,10 @@ training:
   lr: 1.0e-4
   epochs: 20
   # none | inv_sqrt | enet | inv. Round 1 trained with "none" (uniform).
-  # Weights come from dataset/compute_class_weights.py, computed on the "loss"
+  # Weights come from octree_diff/data/compute_class_weights.py, computed on the "loss"
   # basis (only voxels inside occupied octree nodes, which is all the semantic
   # loss ever sees) with class 0 included.
   class_weights: inv_sqrt
   class_weights_file: "data/replica_class_counts.pt"
-  save_path: "saved_model/vae_model_5.pt"
+  checkpoint_path: "saved_model/vae_model_5.pt"
   data_dir: "data/patches_128x128x64_s16"

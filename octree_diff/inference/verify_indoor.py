@@ -13,14 +13,23 @@ import os
 
 import torch
 
+from octree_diff.octree.build import build_semantic_octree
 from octree_diff.inference.pipeline import (
     DEPTH, GRID, PATCH_SIZE, IndoorPipeline, build_doctree, labels_to_split_big,
     split_big_to_octree, voxel_mask_to_latent_mask, voxel_mask_to_node_mask,
 )
 from octree_diff.octree.util_octree_stuff import (
-    assign_octree_patch_features, get_non_empty_mask, points2octree,
-    reconstruct_voxel_from_patch, voxel_grid_to_points, voxel_to_patch,
+    get_non_empty_mask, points2octree, reconstruct_voxel_from_patch,
+    voxel_grid_to_points,
 )
+
+
+from octree_diff.config import REPO_ROOT
+
+
+def _data(rel):
+    """Data lives under the repo's data/ dir, not the process cwd."""
+    return os.path.join(REPO_ROOT, "data", rel)
 
 
 def _load_patch(path, device):
@@ -29,12 +38,11 @@ def _load_patch(path, device):
 
 
 def _gt_octree(labels, full_depth, device, with_features=True):
-    octree = points2octree(voxel_grid_to_points(get_non_empty_mask(labels, PATCH_SIZE)),
-                           depth=DEPTH, full_depth=full_depth).to(device)
     if with_features:
-        assign_octree_patch_features(voxel_to_patch(labels.unsqueeze(0), PATCH_SIZE)[0],
-                                     octree, DEPTH)
-    return octree
+        return build_semantic_octree(labels.unsqueeze(0), PATCH_SIZE, DEPTH,
+                                     full_depth, device)
+    return points2octree(voxel_grid_to_points(get_non_empty_mask(labels, PATCH_SIZE)),
+                         depth=DEPTH, full_depth=full_depth).to(device)
 
 
 # --------------------------------------------------------------------------
@@ -43,7 +51,7 @@ def check_vae(pipe, args):
     """VAE round-trips — isolates the bridge from the diffusion models."""
     print("\n[vae] structure VAE round-trip")
     ious = []
-    for f in sorted(glob.glob("data/split_outputs/*.pt"))[:args.n]:
+    for f in sorted(glob.glob(_data("split_outputs/*.pt")))[:args.n]:
         x = torch.load(f, weights_only=True).unsqueeze(0).to(pipe.device).float()
         with torch.no_grad():
             mu, _ = pipe.str_vae.encode(x)
@@ -54,7 +62,7 @@ def check_vae(pipe, args):
 
     print("[vae] semantic VAE round-trip")
     accs, occ_accs = [], []
-    for f in sorted(glob.glob("data/patches_val/*.pt"))[:args.n]:
+    for f in sorted(glob.glob(_data("patches_val/*.pt")))[:args.n]:
         labels = _load_patch(f, pipe.device)
         octree = _gt_octree(labels, pipe.sem_full_depth, pipe.device)
         with torch.no_grad():
@@ -91,7 +99,7 @@ def check_generate(pipe, args):
     gen_frac = sum(fracs) / len(fracs)
 
     real = []
-    for f in sorted(glob.glob("data/split_outputs/*.pt"))[:100]:
+    for f in sorted(glob.glob(_data("split_outputs/*.pt")))[:100]:
         real.append(_occupancy_fraction(torch.load(f, weights_only=True)))
     real_frac = sum(real) / len(real)
     print(f"  occupied fraction of the depth-5 grid: generated {gen_frac:.4f} vs "
@@ -105,7 +113,7 @@ def check_generate(pipe, args):
     if present < 5:
         print("  !! near-degenerate class histogram — the semantic model may have collapsed")
 
-    counts_path = "data/replica_class_counts.pt"
+    counts_path = _data("replica_class_counts.pt")
     if os.path.exists(counts_path):
         real_counts = torch.load(counts_path, weights_only=False)["counts"].float()
         real_occ = real_counts.clone(); real_occ[0] = 0
@@ -114,7 +122,11 @@ def check_generate(pipe, args):
 
 def check_reference(pipe, args):
     """Compare against the lost shipped model's outputs."""
-    ref_dir = "/home/brendan/Replica-Dataset/data_gen"
+    ref_dir = args.ref_dir
+    if not ref_dir:
+        print("\n[reference] skipped — no --ref-dir given "
+              "(samples from the original shipped model; not needed to validate a retrain)")
+        return
     if not os.path.isdir(ref_dir):
         print(f"\n[reference] skipped — {ref_dir} not found")
         return
@@ -136,7 +148,7 @@ def check_reference(pipe, args):
 def check_inpaint(pipe, args):
     """Mask half a val patch and complete it."""
     print("\n[inpaint] half-scene completion")
-    labels = _load_patch(sorted(glob.glob("data/patches_val/*.pt"))[0], pipe.device)
+    labels = _load_patch(sorted(glob.glob(_data("patches_val/*.pt")))[0], pipe.device)
     known = torch.zeros(GRID, dtype=torch.bool, device=pipe.device)
     known[:GRID[0] // 2] = True
     known_labels = torch.where(known, labels, torch.zeros_like(labels))
@@ -166,7 +178,7 @@ def check_inpaint(pipe, args):
 def check_outpaint(pipe, args):
     """Extend along +x and look for seams."""
     print("\n[outpaint] extension along +x")
-    labels = _load_patch(sorted(glob.glob("data/patches_val/*.pt"))[0], pipe.device)
+    labels = _load_patch(sorted(glob.glob(_data("patches_val/*.pt")))[0], pipe.device)
     scene = labels.clone()
     half = GRID[0] // 2
     fracs = []
@@ -212,11 +224,16 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--checks", nargs="+", default=list(CHECKS), choices=list(CHECKS))
     p.add_argument("--steps", type=int, default=50)
-    p.add_argument("--resample", type=int, default=1)
+    # hyphenated canonical spelling, underscore kept as an alias
+    p.add_argument("--repaint-resample", "--resample", type=int, default=1,
+                   dest="resample", help="RePaint jumps per step")
     p.add_argument("--n", type=int, default=10, help="patches per VAE check")
-    p.add_argument("--n_gen", type=int, default=8)
-    p.add_argument("--n_ref", type=int, default=100)
-    p.add_argument("--n_out", type=int, default=4)
+    p.add_argument("--n-gen", "--n_gen", type=int, default=8, dest="n_gen")
+    p.add_argument("--n-ref", "--n_ref", type=int, default=100, dest="n_ref")
+    p.add_argument("--n-out", "--n_out", type=int, default=4, dest="n_out")
+    p.add_argument("--ref-dir", default=None,
+                   help="directory of samples from a previously shipped model, for the "
+                        "[reference] check; omit to skip it")
     p.add_argument("--device", default="cuda")
     args = p.parse_args()
 

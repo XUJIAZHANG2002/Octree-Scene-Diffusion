@@ -2,28 +2,24 @@ import torch
 import torch.nn.functional as F
 import tqdm
 import os
-from octree_diff.models.structure.structure_vae import VoxelVAE
+from octree_diff.models.factory import build_structure_vae
 from octree_diff.data.split_dataset import get_split_dataloader
-from octree_diff.config import load_config
+from octree_diff.config import load_stage
 
 
-def train():
+def train(config_dir=None, device=None):
     # Load configuration
-    config = load_config("configs/structure_vae_config.yaml")
+    config, _ = load_stage("str_vae", config_dir)
     m_cfg = config["model"]
     t_cfg = config["training"]
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     # 1. Setup Data
     loader = get_split_dataloader(t_cfg["data_dir"], batch_size=t_cfg["batch_size"])
 
     # 2. Initialize Model
-    model = VoxelVAE(
-        z_channels=m_cfg["z_channels"],
-        base=m_cfg["base_channels"],
-        in_ch=m_cfg["in_channels"]
-    ).to(device)
+    model = build_structure_vae(m_cfg, device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=t_cfg["lr"])
     

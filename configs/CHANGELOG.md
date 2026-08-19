@@ -18,8 +18,8 @@ single RTX 4070 Ti Super (16 GB), conda env `octfusion`.
 
 | dataset | path | notes |
 |---|---|---|
-| semantic patches | `data/patches_128x128x64_s16` → `/home/brendan/Replica-Dataset/data_patch/train` | 2079 patches, `labels` `[64,128,128]` int32 + `meta`, labels 0–91 |
-| val patches | `data/patches_val` → `/home/brendan/Replica-Dataset/data_patch/val` | 232 patches |
+| semantic patches | `data/patches_128x128x64_s16` (symlink into the Replica release: `data_patch/train`) | 2079 patches, `labels` `[64,128,128]` int32 + `meta`, labels 0–91 |
+| val patches | `data/patches_val` (symlink into the Replica release: `data_patch/val`) | 232 patches |
 | structure splits | `data/split_outputs` | **derived, not stored** — regenerate with `python -m dataset.build_split_dataset` (patch_size 2, depth 6, full_depth 4 → `[1,32,32,32]` in {−1,+1}) |
 | class counts | `data/replica_class_counts.pt` | `python -m dataset.compute_class_weights` |
 

@@ -13,11 +13,11 @@ unet:
 
 training:
   lr: 1.0e-4
-  t_max: 60            # epochs (batch is forced to 1 by the octree build)
+  epochs: 60           # batch is forced to 1 by the octree build
   accum_steps: 8       # effective batch 8
   warmup_steps: 500
   ema_decay: 0.999
   grad_clip: 1.0
-  latent_scale: auto   # "auto" measures the VAE latent std; see utils/latent_scale.py
-  save_path: "saved_model/unet_sem_diffusion.pt"
+  latent_scale: auto   # "auto" measures the VAE latent std; see octree_diff/training/latent_scale.py
+  checkpoint_path: "saved_model/unet_sem_diffusion.pt"
   data_dir: "data/patches_128x128x64_s16"

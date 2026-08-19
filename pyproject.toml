@@ -31,6 +31,9 @@ notebooks = ["jupyterlab", "ipykernel", "nbconvert"]
 viz = ["open3d"]
 outdoor = ["open3d"]   # velodene_to_voxel voxelises via o3d.geometry.PointCloud
 
+[project.scripts]
+octree-diff = "octree_diff.cli:main"
+
 [project.urls]
 Paper = "https://arxiv.org/abs/2509.16483"
 

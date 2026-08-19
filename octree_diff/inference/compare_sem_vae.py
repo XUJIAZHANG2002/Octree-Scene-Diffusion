@@ -5,8 +5,8 @@ round 2 with inv_sqrt. Weighting is expected to trade a little overall accuracy
 for a lot of rare-class accuracy, so the headline number to watch is the **macro**
 (mean per-class) figure, not the micro one.
 
-    python -m inference_scripts.compare_sem_vae \
-        --a saved_model/round1_uniform/vae_model_5.pt --a-name uniform \
+    python -m octree_diff.inference.compare_sem_vae \
+        --a saved_model/<baseline>.pt --a-name uniform \
         --b saved_model/vae_model_5.pt --b-name inv_sqrt
 """
 
@@ -15,12 +15,10 @@ import glob
 
 import torch
 
+from octree_diff.octree.build import build_semantic_octree
 from octree_diff.models.semantic.graph_sem_vae import GraphVAE
 from octree_diff.config import load_config
-from octree_diff.octree.util_octree_stuff import (
-    assign_octree_patch_features, get_non_empty_mask, points2octree,
-    reconstruct_voxel_from_patch, voxel_grid_to_points, voxel_to_patch,
-)
+from octree_diff.octree.util_octree_stuff import reconstruct_voxel_from_patch
 from octree_diff.viz.vis_indoor import label_name
 
 DEPTH, PATCH = 6, 2
@@ -28,7 +26,7 @@ DEPTH, PATCH = 6, 2
 
 def load_vae(path, m, device):
     vae = GraphVAE(
-        depth=m["depth_in"], channel_in=m["channel_in"], nout=m["nout"],
+        depth=m["depth_in"], channel_in=m["in_channels"], nout=m["nout"],
         full_depth=m["full_depth"], depth_stop=m["depth_stop"],
         depth_out=m["depth_in"], latent_dim=m["latent_dim"],
         num_classes=m["total_classes"], resblk_num=m["resblk_num"],
@@ -48,10 +46,8 @@ def evaluate(vae, files, m, device, num_classes):
         labels = torch.load(f, map_location="cpu")["labels"]
         labels = labels.long().permute(1, 2, 0).contiguous().to(device)
 
-        octree = points2octree(voxel_grid_to_points(get_non_empty_mask(labels, PATCH)),
-                               depth=DEPTH, full_depth=m["full_depth"]).to(device)
-        assign_octree_patch_features(voxel_to_patch(labels.unsqueeze(0), PATCH)[0],
-                                     octree, DEPTH)
+        octree = build_semantic_octree(labels.unsqueeze(0), PATCH, DEPTH,
+                                       m["full_depth"], device)
 
         _, mu, doctree = vae.extract_code(octree)
         out = vae.decode_code(mu, doctree, update_octree=False, pos=None)
@@ -81,8 +77,8 @@ def summarise(correct, total, pred_total):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--a", default="saved_model/round1_uniform/vae_model_5.pt")
-    p.add_argument("--b", default="saved_model/vae_model_5.pt")
+    p.add_argument("--a", required=True, help="baseline checkpoint")
+    p.add_argument("--b", required=True, help="checkpoint to compare against it")
     p.add_argument("--a-name", default="A")
     p.add_argument("--b-name", default="B")
     p.add_argument("--n", type=int, default=40)
