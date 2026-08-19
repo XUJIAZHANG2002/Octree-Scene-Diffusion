@@ -21,9 +21,9 @@ import re
 
 # (pattern, replacement) applied line-wise to code cells
 RULES = [
-    (r"^(\s*)from util_octree_stuff import", r"\1from utils.util_octree_stuff import"),
-    (r"^(\s*)from util_sample_stuff import", r"\1from utils.util_sample_stuff import"),
-    (r"^(\s*)from velodyne_to_voxel import", r"\1from dataset.velodyne_to_voxel import"),
+    (r"^(\s*)from util_octree_stuff import", r"\1from octree_diff.octree.util_octree_stuff import"),
+    (r"^(\s*)from util_sample_stuff import", r"\1from octree_diff.diffusion.util_sample_stuff import"),
+    (r"^(\s*)from velodyne_to_voxel import", r"\1from octree_diff.data.kitti.velodyne_to_voxel import"),
     (r"graph_densed_sem_vae", r"graph_sem_vae"),
 ]
 

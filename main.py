@@ -18,10 +18,10 @@ def main():
 
     # Mapping stages to their specific scripts
     script_map = {
-        "str_vae": "train_scripts/train_structure_vae.py",
-        "str_diff": "train_scripts/train_structure_diffusion.py",
-        "sem_vae": "train_scripts/train_sem_vae.py",
-        "sem_diff": "train_scripts/train_sem_diffusion.py"
+        "str_vae": "octree_diff/training/train_structure_vae.py",
+        "str_diff": "octree_diff/training/train_structure_diffusion.py",
+        "sem_vae": "octree_diff/training/train_sem_vae.py",
+        "sem_diff": "octree_diff/training/train_sem_diffusion.py"
     }
 
     # Default config mapping
