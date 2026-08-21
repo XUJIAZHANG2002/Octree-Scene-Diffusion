@@ -128,3 +128,16 @@ def visualize_kitti_instance(voxel_grid):
     plt.axis('off')
     plt.title("Semantic Label → Color Legend")
     plt.show()
+
+
+def visualize_structure(voxels):
+    """Show an occupancy tensor as a KITTI-coloured voxel grid.
+
+    Was defined inline in notebooks/kitti/02, which meant the other four
+    notebooks called it without defining it and only worked if 02 had been run
+    first in the same kernel. Promoted here so each notebook stands alone.
+    """
+    voxels_clone = voxels.clone()
+    voxels_clone[voxels_clone < 0] = 0
+    voxels_clone[voxels_clone > 0] = 1
+    visualize_kitti_instance(voxels_clone[0])

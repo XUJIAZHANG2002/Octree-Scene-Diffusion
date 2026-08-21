@@ -8,15 +8,28 @@ outputs, so you can read it without running anything.
 
 It is the indoor counterpart to `../kitti/03_completion_then_outpaint.ipynb`. The
 outdoor notebooks carve their observed/unobserved mask by reverse ray-tracing from the
-LiDAR origin; `utils/sensor_sim.py` is the indoor equivalent.
+LiDAR origin; `octree_diff/inference/sensor_sim.py` is the indoor equivalent.
 
-Supporting modules, both new:
+**`02_generation_and_extension.ipynb`** — the unconditional paths: sampling a scene
+from noise (structure then semantics), re-labelling one layout several times, a
+population check of generated scenes against held-out real ones, and sliding +x scene
+extension with seam diagnostics. Also saved with outputs.
 
-- `utils/sensor_sim.py` — `pick_viewpoint`, `simulate_sensor` (tri-state free /
-  observed / unknown), `observed_labels`
-- `utils/vis_indoor.py` — inline matplotlib rendering (`plot_3d`, `plot_slice`,
-  `plot_state`, `compare_row`) and `completion_metrics`. Deliberately avoids Open3D,
-  which blocks on a GUI window and is useless over SSH.
+Supporting modules:
+
+- `octree_diff/inference/sensor_sim.py` — `pick_viewpoint`, `simulate_sensor`
+  (tri-state free / observed / unknown), `observed_labels`
+- `octree_diff/viz/vis_indoor.py` — inline matplotlib rendering (`plot_3d`,
+  `plot_slice`, `plot_state`, `compare_row`) and `completion_metrics`. Deliberately
+  avoids Open3D, which blocks on a GUI window and is useless over SSH.
+
+Run them in the lean inference environment (`requirements-inference.txt`); unlike the
+KITTI notebooks they need no Open3D. Both re-execute from repo data and the
+checkpoints in `saved_model/` with nothing else configured.
+
+> `octree_diff/octree/util_dualoctree.py` calls `matplotlib.use("Agg")` at import, so
+> `%matplotlib inline` must come **after** the pipeline imports or figures silently
+> do not render.
 
 Note: `utils/util_dualoctree.py` calls `matplotlib.use("Agg")` at import time, so a
 notebook must re-enable `%matplotlib inline` **after** importing anything from the

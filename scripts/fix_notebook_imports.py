@@ -20,11 +20,32 @@ import json
 import re
 
 # (pattern, replacement) applied line-wise to code cells
+# Two migrations, applied in order:
+#   1. bare module names, from the flat working tree the notebooks were saved in
+#   2. the pre-package-move layout (utils/, models/networks/, dataset/, ...)
+# Longest module paths first so a general rule cannot eat a specific one.
 RULES = [
+    # legacy bare imports
     (r"^(\s*)from util_octree_stuff import", r"\1from octree_diff.octree.util_octree_stuff import"),
     (r"^(\s*)from util_sample_stuff import", r"\1from octree_diff.diffusion.util_sample_stuff import"),
+    (r"^(\s*)from util_dualoctree import", r"\1from octree_diff.octree.util_dualoctree import"),
     (r"^(\s*)from velodyne_to_voxel import", r"\1from octree_diff.data.kitti.velodyne_to_voxel import"),
     (r"graph_densed_sem_vae", r"graph_sem_vae"),
+    # pre-package-move module paths
+    (r"\bmodels\.networks\.diffusion_networks\.ldm_diffusion_util\b", "octree_diff.models.common.ldm_diffusion_util"),
+    (r"\bmodels\.networks\.diffusion_networks\.graph_unet_hr\b", "octree_diff.models.semantic.graph_unet_hr"),
+    (r"\bmodels\.networks\.diffusion_networks\.graph_unet_lr\b", "octree_diff.models.outdoor.graph_unet_lr"),
+    (r"\bmodels\.networks\.dualoctree_networks\.graph_sem_vae\b", "octree_diff.models.semantic.graph_sem_vae"),
+    (r"\bmodels\.networks\.dualoctree_networks\.dual_octree\b", "octree_diff.models.semantic.dual_octree"),
+    (r"\bmodels\.structure_networks\.structure_vae\b", "octree_diff.models.structure.structure_vae"),
+    (r"\bmodels\.structure_networks\.unet_3d\b", "octree_diff.models.structure.unet_3d"),
+    (r"\bdataset\.velodyne_to_voxel\b", "octree_diff.data.kitti.velodyne_to_voxel"),
+    (r"\binference_scripts\.inference_indoor\b", "octree_diff.inference.pipeline"),
+    (r"\butils\.util_octree_stuff\b", "octree_diff.octree.util_octree_stuff"),
+    (r"\butils\.util_dualoctree\b", "octree_diff.octree.util_dualoctree"),
+    (r"\butils\.util_sample_stuff\b", "octree_diff.diffusion.util_sample_stuff"),
+    (r"\butils\.sensor_sim\b", "octree_diff.inference.sensor_sim"),
+    (r"\butils\.vis_indoor\b", "octree_diff.viz.vis_indoor"),
 ]
 
 

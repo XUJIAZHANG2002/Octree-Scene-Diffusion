@@ -1,11 +1,15 @@
 # Notebooks
 
-These are the notebooks the paper's results were actually produced with. They are
-**all outdoor / SemanticKITTI**. For indoor (Replica) inference use
-`inference_scripts/inference_indoor.py` instead — see `notebooks/indoor/README.md`.
+These are the notebooks the paper's outdoor results were actually produced with.
+For indoor (Replica) see `notebooks/indoor/`, which has two notebooks of its own.
 
-`inference_scripts/inference.py` is a later attempt at packaging this up. It does
-not work; the defects are catalogued in `inference_scripts/NOTES.md`.
+Both halves are also driven from the CLI:
+
+```bash
+octree-diff generate | complete | extend | verify
+```
+
+Historical defect notes live in `docs/inference-notes.md`.
 
 ## Renamed from
 
@@ -23,7 +27,7 @@ not work; the defects are catalogued in `inference_scripts/NOTES.md`.
 is fully continuous-log-SNR. Uses a different structure model
 (`in_split_channels=8, model_channels=32`) on octant-coded `[1,8,16,16,8]`.
 Contains the original `split_outputs` generation cell that
-`dataset/build_split_dataset.py` is derived from, the numba reverse-ray-trace
+`octree_diff/data/build_split_dataset.py` is derived from, the numba reverse-ray-trace
 occupancy carving, and — cell 23 — the only
 `ddim_sample_structure_logsnr_cosine_inpaint`: x0-prediction, continuous
 schedule, deterministic DDIM. That is the formulation the *current* training code
@@ -58,27 +62,41 @@ voxel grid, and the sliding +x scene-extension loop. Note
 `outpaint_structure_along_x` is an **empty stub**; the real implementation is the
 inline `while` loop in the cell above it.
 
-## Why they will not run as-is against this repo
+## Running them
 
-Not fixed on purpose — recorded so nobody rediscovers it the hard way.
+Fixed and verified: `01_completion_ddim_logsnr.ipynb` runs end to end against the
+recovered `octree_diff/data/kitti/velodyne_to_voxel.py` and the original KITTI
+checkpoints. What it needed:
 
-1. **`graph_densed_sem_vae` was renamed.** Commit `19ece4d` renamed
-   `models/networks/dualoctree_networks/graph_densed_sem_vae.py` →
-   `graph_sem_vae.py` (94% similar; only `mpu.NeuralMPU` was dropped — the
-   `extract_code` / `decode_code` / `create_child_octree` API is identical). One
-   import line, not a lost module.
-2. **`reconstruct_voxel_from_patch` lost its `patch_size` argument.** Every
-   notebook calls it with `patch_size=4`, but the current signature
-   (`utils/util_octree_stuff.py:53`) is
-   `(sem_voxs, octree, depth, shape=(1,128,128,64))` and hardcodes `x*2`/`y*2` —
-   i.e. it is now indoor/patch-2 only. Notebook calls raise `TypeError`.
-   Restoring patch-4 means turning that `*2` into a parameter.
-3. **They need the old KITTI checkpoints and hyperparameters** —
-   `~/SemCityOcto/vae_fdepth6_ldim8_8.pt`, `Model_is_good_8_6.pt`,
-   `checkpoints/structure_ddpm_ep*.pt`, with `latent_dim=8`, `num_classes=21`,
-   `patch_size=4`. They will not load the Replica checkpoints in `saved_model/`.
-4. **Imports assume a flat cwd** — `from util_sample_stuff import *` rather than
-   `from utils.util_sample_stuff import *`.
+1. **`patch_size=4` on `GraphVAE`.** Outdoor was trained with a 4x4 patch decoder;
+   the default is 2, and the outdoor checkpoint will not load into it
+   (`patch_sem_predict.upconv.*` shape mismatch). This was the single reason the
+   outdoor VAE appeared unloadable.
+2. **`visualize_structure` was defined inline in `02_`**, so the other notebooks
+   called it undefined and only worked if `02_` had been run first in the same
+   kernel. It now lives in `octree_diff/viz/open3d_viewers.py`.
+3. **Imports and paths.** Module paths were rewritten for the package layout
+   (`scripts/fix_notebook_imports.py`), and the machine-specific checkpoint and
+   dataset roots are now environment variables:
+
+   ```bash
+   export OCTREE_DIFF_KITTI_WEIGHTS=/path/to/kitti/checkpoints   # default weights/kitti
+   export OCTREE_DIFF_KITTI_DATA=/path/to/semantic-kitti          # default data/kitti
+   ```
+
+You need the **outdoor** checkpoints (`vae_fdepth6_ldim8_8.pt`,
+`Model_is_good_8_6.pt`, `structure_ddpm_ep*.pt`) with `latent_dim=8`,
+`num_classes=21`, `patch_size=4`. These notebooks will not load the Replica
+checkpoints in `saved_model/`, and the reverse is equally true.
+
+Use the `octfusion` environment, not the lean inference one — the outdoor path
+needs `open3d`, `numba` and `scikit-learn`. Open3D's `draw_geometries` degrades
+gracefully with no display (it warns and returns), so the notebooks run headless;
+you just do not get the interactive 3D windows.
+
+**Known remaining defect:** `01_`, cell 18 (`(occupancy_vis != gt).sum()`) raises
+`AttributeError` — a stale diagnostic line comparing mismatched types. Nothing
+downstream uses it. Pre-existing; left alone rather than guessed at.
 
 ## Landmines in the code itself
 
@@ -95,6 +113,6 @@ If you lift functions out of these notebooks, know that:
   it ever ran.
 - The structure models here are **ε-prediction, discrete DDPM (T=1000, linear
   betas), operating directly on the split grid**. The current
-  `train_structure_diffusion.py` is **x0-prediction, continuous log-SNR, on a
+  `octree_diff/training/train_structure_diffusion.py` is **x0-prediction, continuous log-SNR, on a
   VoxelVAE latent**. The `sample_ddpm*` family cannot be pointed at the new
   checkpoints.
