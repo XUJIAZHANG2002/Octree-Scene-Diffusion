@@ -9,3 +9,4 @@ __pycache__/
 *.egg-info/
 *.zip
 build/
+data/sample_scenes/
