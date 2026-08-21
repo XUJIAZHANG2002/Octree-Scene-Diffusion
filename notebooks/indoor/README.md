@@ -31,10 +31,6 @@ checkpoints in `saved_model/` with nothing else configured.
 > `%matplotlib inline` must come **after** the pipeline imports or figures silently
 > do not render.
 
-Note: `utils/util_dualoctree.py` calls `matplotlib.use("Agg")` at import time, so a
-notebook must re-enable `%matplotlib inline` **after** importing anything from the
-pipeline or its figures will silently not render.
-
 ## Environment
 
 The notebook runs in the conda env **`octree-nb`**, registered as the Jupyter kernel

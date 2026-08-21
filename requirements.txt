@@ -1,32 +1,40 @@
+# Full stack: training, indoor inference, and the outdoor / SemanticKITTI notebooks.
+# For indoor inference only, requirements-inference.txt is a much smaller set.
+#
+# IMPORTANT: torch and torchvision must be installed FIRST, from the CUDA index,
+# and in the same command. `ocnn` depends on torchvision; if torchvision is
+# missing when ocnn is installed, pip resolves it from PyPI and drags a newer
+# torch along with it, silently replacing a working CUDA build with one your
+# driver cannot run.
+#
+#   conda create -n octfusion python=3.11 -y && conda activate octfusion
+#   pip install torch==2.5.1 torchvision==0.20.1 \
+#       --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements.txt
+#
+# cu121 wheels work on driver 525+. Verify with:
+#   python -c "import torch; print(torch.cuda.is_available())"
+#
+# Every entry below is imported somewhere in octree_diff/, scripts/ or notebooks/.
+
 ocnn==2.2.2
-h5py
-termcolor
-scipy
-einops
-tqdm
-matplotlib
-opencv-python
-PyMCubes
-imageio
-trimesh
-omegaconf
-tensorboard
-notebook
-numpy
-tqdm
-yacs
-scipy
-plyfile
-tensorboard
-scikit-image
-trimesh
-wget
-mesh2sdf
-matplotlib
-objaverse
-pandas
-kornia
-ftfy
-regex
-timm
-open3d
+
+numpy==2.0.1
+scipy==1.15.3
+scikit-image==0.25.2
+matplotlib==3.10.3
+trimesh==4.6.11
+einops==0.8.1
+plyfile==1.1.2
+pyyaml==6.0.2
+tqdm==4.67.1
+
+# outdoor / SemanticKITTI notebooks only
+open3d==0.19.0          # velodene_to_voxel voxelises through o3d.geometry.PointCloud
+numba==0.61.2           # reverse ray-trace occupancy carving
+scikit-learn==1.7.0     # GMM latent analysis
+
+# notebooks
+jupyterlab
+ipykernel
+nbconvert

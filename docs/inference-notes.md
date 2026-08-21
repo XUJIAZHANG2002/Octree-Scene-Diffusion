@@ -1,3 +1,9 @@
+> **Historical.** These notes were written before the code was reorganised into the
+> `octree_diff` package, and the module paths below are the pre-restructure ones
+> (`utils/`, `inference_scripts/`, `dataset/`). `inference_scripts/inference.py`, the
+> script this document exists to warn about, has since been deleted. Kept as the
+> record of *why*, and of what the outdoor notebooks each contain.
+
 # Inference — state of play
 
 Written during the Replica indoor retrain (2026-08-06): a record of what works,
