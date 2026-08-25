@@ -180,39 +180,48 @@ def load_models(weights, device):
     return vae, sem, struct
 
 
+def _to_split(vol):
+    """Dense (64,64,64) occupancy -> the [1,8,16,16,8] split grid the UNet eats."""
+    from octree_diff.octree.util_dualoctree import octree2split_small
+    from octree_diff.octree.util_octree_stuff import points2octree, voxel_grid_to_points
+    octree = points2octree(voxel_grid_to_points(vol), depth=DEPTH, full_depth=FULL_DEPTH)
+    return octree2split_small(octree, 4)[:, :, :, :, 0:8]
+
+
+def conditioning(occ):
+    """Tri-state occupancy -> (known latent, mask) at split resolution.
+
+    mask is 1 where the observation is known. Verified end to end: with the mask
+    fully on the sampler reproduces `z_known` exactly.
+    """
+    from octree_diff.octree.util_octree_stuff import get_non_empty_mask
+
+    known = torch.from_numpy(occ != -1)
+    padded_mask = torch.zeros((64, 64, 64))
+    padded_mask[:, :, :GRID[2]] = get_non_empty_mask(known, PATCH)
+
+    padded_z = torch.zeros((64, 64, 64))
+    padded_z[:, :, :GRID[2]] = torch.from_numpy(
+        reduce_patches_tri_state(occ).astype(np.float32))
+    padded_z[padded_z == -1] = 0                      # unknown draws as empty
+
+    mask = _to_split(padded_mask)
+    mask[mask == -1] = 0
+    return _to_split(padded_z), mask
+
+
 @torch.no_grad()
-def complete(labels, occ, vae, sem, struct, device, steps, resample):
+def synthesize(z_known, mask, vae, sem, struct, device, steps, resample):
+    """Structure diffusion (masked where `mask` is set) then latent semantics."""
     from octree_diff.diffusion.util_sample_stuff import (
         ddim_sample_logsnr_cosine, ddim_sample_structure_logsnr_cosine_inpaint)
     from octree_diff.models.semantic.dual_octree import DualOctree
-    from octree_diff.octree.util_dualoctree import octree2split_small, split2octree_small
-    from octree_diff.octree.util_octree_stuff import (
-        get_non_empty_mask, points2octree, reconstruct_voxel_from_patch,
-        voxel_grid_to_points)
-
-    def to_split(vol):
-        """Dense (64,64,64) occupancy -> the [1,8,16,16,8] split grid the UNet eats."""
-        octree = points2octree(voxel_grid_to_points(vol), depth=DEPTH, full_depth=FULL_DEPTH)
-        return octree2split_small(octree, 4)[:, :, :, :, 0:8]
-
-    known = torch.from_numpy(occ != -1)
-    mask32 = get_non_empty_mask(known, PATCH)                 # (64,64,32)
-    padded_mask = torch.zeros((64, 64, 64))
-    padded_mask[:, :, :GRID[2]] = mask32
-
-    z32 = torch.from_numpy(reduce_patches_tri_state(occ).astype(np.float32))
-    padded_z = torch.zeros((64, 64, 64))
-    padded_z[:, :, :GRID[2]] = z32
-    padded_z[padded_z == -1] = 0                              # unknown draws as empty
-
-    patch_mask = to_split(padded_mask)
-    patch_mask[patch_mask == -1] = 0
-    z_known = to_split(padded_z)
+    from octree_diff.octree.util_dualoctree import split2octree_small
+    from octree_diff.octree.util_octree_stuff import reconstruct_voxel_from_patch
 
     z_T = torch.randn(1, 8, 16, 16, 8, device=device)
     sample = ddim_sample_structure_logsnr_cosine_inpaint(
-        z_T, z_known.to(device), struct, patch_mask.to(device),
-        S=steps, jump_n_sample=resample)
+        z_T, z_known.to(device), struct, mask.to(device), S=steps, jump_n_sample=resample)
     sample = torch.where(sample > 0, 1.0, -1.0)
 
     split = torch.ones((1, 8, 16, 16, 16)) * -1
@@ -229,18 +238,35 @@ def complete(labels, occ, vae, sem, struct, device, steps, resample):
     return vox[0].detach().cpu().numpy().astype(np.int32)
 
 
+def dense_conditioning(labels, keep_frac):
+    """Known everywhere in the first `keep_frac` of x, unknown beyond -- outpainting.
+
+    Roughly the 0.75 known / 0.25 generated split the paper extends scenes with.
+    """
+    occ = np.full(labels.shape, -1, dtype=np.int8)
+    cut = int(round(labels.shape[0] * keep_frac))
+    occ[:cut] = 0
+    occ[:cut][labels[:cut] > 0] = 1
+    return occ
+
+
 # --------------------------------------------------------------------- driver
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--mode", default="complete",
+                    choices=["complete", "generate", "extend"])
     ap.add_argument("--data", default="/home/brendan/SemCityOcto/dataset")
     ap.add_argument("--weights", default="/home/brendan/SemCityOcto")
     ap.add_argument("--frames", nargs="+", default=["00:000202"],
                     help="sequence:scan pairs, e.g. 00:000202")
+    ap.add_argument("--samples", type=int, default=4, help="generate: how many")
+    ap.add_argument("--keep", type=float, default=0.75,
+                    help="extend: fraction of x kept as known")
     ap.add_argument("--out", default=os.path.join(REPO, "out", "web_kitti"))
     ap.add_argument("--steps", type=int, default=50)
-    ap.add_argument("--resample", type=int, default=20, help="RePaint jumps")
+    ap.add_argument("--resample", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default=None)
     args = ap.parse_args(argv)
@@ -265,39 +291,98 @@ def main(argv=None):
     print("loading models...")
     vae, sem, struct = load_models(args.weights, device)
 
-    out_scenes = []
-    for spec in args.frames:
+    def load_frame(spec):
         seq, scan = spec.split(":")
-        labels = np.asarray(velodene_to_voxel(args.data, seq, scan)).astype(np.int32)
-        labels[labels == 255] = 0                     # 255 marks invalid, not a class
+        vol = np.asarray(velodene_to_voxel(args.data, seq, scan)).astype(np.int32)
+        vol[vol == 255] = 0                 # 255 marks invalid, not a class
+        return seq, scan, vol
 
-        occ = observed_state(labels)
-        seen = float((occ != -1).mean())
-        print(f"{spec}: {int((labels > 0).sum()):,} hits, {seen:.0%} of the volume observed")
+    def emit(sid, name, vol):
+        buf = encode(vol)
+        vis, _ = check_roundtrip(vol, buf)
+        fn = f"{sid}_{name}.bin"
+        buf.tofile(os.path.join(args.out, fn))
+        print(f"  {name:10s} {vis:7,} visible  {len(buf) * 4 / 1024:6.0f} KB")
+        return {"file": fn, "count": int(len(buf))}
 
-        torch.manual_seed(args.seed)
-        done = complete(labels, occ, vae, sem, struct, device, args.steps, args.resample)
-        recall = float((done[labels > 0] == labels[labels > 0]).mean())
-        print(f"  label agreement on the observed hits: {recall:.4f}")
+    scenes, variants = [], None
 
-        variants = {}
-        for name, vol in (("observed", labels), ("completed", done)):
-            buf = encode(vol)
-            vis, dropped = check_roundtrip(vol, buf)
-            fn = f"{seq}_{scan}_{name}.bin"
-            buf.tofile(os.path.join(args.out, fn))
-            variants[name] = {"file": fn, "count": int(len(buf))}
-            print(f"  {name:10s} {vis:7,} visible  {len(buf) * 4 / 1024:6.0f} KB")
+    if args.mode == "generate":
+        variants = [{"key": "sample", "label": "Generated",
+                     "hint": "sampled from noise, nothing observed"}]
+        zeros = torch.zeros(1, 8, 16, 16, 8)
+        for i in range(args.samples):
+            torch.manual_seed(args.seed + i)
+            print(f"sample_{i:02d}: generating...")
+            vol = synthesize(zeros, zeros, vae, sem, struct, device,
+                             args.steps, 1)
+            scenes.append({
+                "id": f"sample_{i:02d}", "scene": f"sample {i}",
+                "occupied_voxels": int((vol > 0).sum()),
+                "classes": int(len(np.unique(vol[vol > 0]))),
+                "variants": {"sample": emit(f"sample_{i:02d}", "sample", vol)},
+            })
 
-        out_scenes.append({
-            "id": f"{seq}_{scan}",
-            "scene": f"sequence {seq}, scan {scan}",
-            "occupied_voxels": int((labels > 0).sum()),
-            "classes": int(len(np.unique(labels[labels > 0]))),
-            "volume_observed": round(seen, 4),
-            "accuracy": {"observed_hit_agreement": round(recall, 4)},
-            "variants": variants,
-        })
+    elif args.mode == "extend":
+        variants = [{"key": "input", "label": "Known region",
+                     "hint": f"the first {args.keep:.0%} of the scene is held fixed"},
+                    {"key": "extended", "label": "Extended",
+                     "hint": "the rest generated by outpainting"}]
+        for spec in args.frames:
+            seq, scan, labels = load_frame(spec)
+            sid = f"{seq}_{scan}"
+            cut = int(round(labels.shape[0] * args.keep))
+
+            # Outpaint from a dense canvas, not from the raw sweep. A single scan
+            # has no hits beyond x=192 here, so cutting it at 75% removes nothing
+            # and "extend" would just be "complete" under another name. Completing
+            # first gives the dense scene the paper outpaints from.
+            print(f"{spec}: completing to build the canvas...")
+            torch.manual_seed(args.seed)
+            z0, m0 = conditioning(observed_state(labels))
+            canvas = synthesize(z0, m0, vae, sem, struct, device,
+                                args.steps, args.resample)
+
+            print(f"  outpainting the last {1 - args.keep:.0%} of x...")
+            torch.manual_seed(args.seed + 1)
+            z_known, mask = conditioning(dense_conditioning(canvas, args.keep))
+            grown = synthesize(z_known, mask, vae, sem, struct, device,
+                               args.steps, args.resample)
+            known_only = canvas.copy()
+            known_only[cut:] = 0
+            scenes.append({
+                "id": sid, "scene": f"sequence {seq}, scan {scan}",
+                "occupied_voxels": int((grown > 0).sum()),
+                "classes": int(len(np.unique(grown[grown > 0]))),
+                "keep_fraction": args.keep,
+                "variants": {"input": emit(sid, "input", known_only),
+                             "extended": emit(sid, "extended", grown)},
+            })
+
+    else:
+        variants = [{"key": "observed", "label": "LiDAR scan",
+                     "hint": "a single sweep, voxelised"},
+                    {"key": "completed", "label": "Completed",
+                     "hint": "the model's completion"}]
+        for spec in args.frames:
+            seq, scan, labels = load_frame(spec)
+            sid = f"{seq}_{scan}"
+            occ = observed_state(labels)
+            seen = float((occ != -1).mean())
+            print(f"{spec}: {int((labels > 0).sum()):,} hits, "
+                  f"{seen:.0%} of the volume observed")
+            torch.manual_seed(args.seed)
+            z_known, mask = conditioning(occ)
+            done = synthesize(z_known, mask, vae, sem, struct, device,
+                              args.steps, args.resample)
+            scenes.append({
+                "id": sid, "scene": f"sequence {seq}, scan {scan}",
+                "occupied_voxels": int((labels > 0).sum()),
+                "classes": int(len(np.unique(labels[labels > 0]))),
+                "volume_observed": round(seen, 4),
+                "variants": {"observed": emit(sid, "observed", labels),
+                             "completed": emit(sid, "completed", done)},
+            })
 
     manifest = {
         "dataset": "semantickitti",
@@ -309,20 +394,17 @@ def main(argv=None):
         "class_names": class_names,
         "palette": palette,
         "default_cut": 1.0,        # outdoor scenes are flat; nothing to cut away
-        "variants": [
-            {"key": "observed", "label": "LiDAR scan", "hint": "a single sweep, voxelised"},
-            {"key": "completed", "label": "Completed", "hint": "the model's completion"},
-        ],
+        "variants": variants,
         "sampling": {"steps": args.steps, "repaint_resample": args.resample,
                      "seed": args.seed},
-        "scenes": out_scenes,
+        "scenes": scenes,
     }
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=1)
         f.write("\n")
 
-    total = sum(v["count"] * 4 for s in out_scenes for v in s["variants"].values())
-    print(f"\nwrote {args.out}/  --  {len(out_scenes)} scenes, {total / 1024 / 1024:.1f} MB")
+    total = sum(v["count"] * 4 for s in scenes for v in s["variants"].values())
+    print(f"\nwrote {args.out}/  --  {len(scenes)} scenes, {total / 1024 / 1024:.1f} MB")
 
 
 if __name__ == "__main__":
