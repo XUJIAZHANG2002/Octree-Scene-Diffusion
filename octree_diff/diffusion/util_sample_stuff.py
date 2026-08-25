@@ -51,59 +51,57 @@ def ddim_sample_structure_logsnr_cosine(z_T, model, S=50, predict_mode="x0"):
     return z_t
 
 
-# @torch.no_grad()
-# def ddim_sample_structure_logsnr_cosine_inpaint(z_T, model, mask, S=50, predict_mode="x0"):
-#     """
-#     DDIM sampling using logSNR cosine schedule and x₀ prediction.
+@torch.no_grad()
+def ddim_sample_structure_logsnr_cosine_inpaint(z_T, z_gt, model, mask, S=50,
+                                                jump_n_sample=1, predict_mode="x0"):
+    """DDIM structure inpainting on the dense split grid (the outdoor path).
 
-#     Args:
-#         z_T (torch.Tensor): Starting noise [B, C, H, W, D]
-#         model (nn.Module): The trained diffusion model
-#         doctree: Optional structure for conditioning (can be None)
-#         S (int): Number of inference steps
-#         predict_mode (str): Must be "x0" for now
-#     Returns:
-#         z_t: final denoised sample [B, C, H, W, D]
-#     """
-#     assert predict_mode == "x0", "Only x0 mode is supported for now."
+    `mask` is 1 where the observation is known: at every step the prediction is
+    overwritten there by the known latent renoised to the current level, so the
+    model only fills the unobserved region.
 
-#     # === Setup DDIM timestep schedule ===
-#     t_steps = torch.linspace(1., 0., S + 1, device=z_T.device)  # [S+1]
-#     t_pairs = list(zip(t_steps[:-1], t_steps[1:]))              # [(t_s, t_s-1)]
+    `jump_n_sample` repeats the update at each timestep. Note that this is *not*
+    RePaint's jump-back -- there is no renoising to an earlier timestep between
+    repeats, so the extra passes iterate the same DDIM step rather than
+    resampling it. The KITTI notebooks call this with 20; the plain single-pass
+    inpaint is 1.
 
-#     z_t = z_T
-#     z_gt = mask.clone()
+    Ported from notebooks/kitti/01_completion_ddim_logsnr.ipynb, which is where
+    this lived -- the copy in this module had been commented out, so nothing
+    importable could complete an outdoor scene. Behaviour is preserved exactly:
+    the notebook carried a jump-back branch guarded by `t > 1`, which can never
+    be true for `t` drawn from linspace(1, 0), and whose body referenced an
+    undefined name. It was dead code and is not reproduced here.
+    """
+    assert predict_mode == "x0", "Only x0 mode is supported for now."
 
-#     for t, t_next in t_pairs:
-#         # Shape [B], values = current time
-#         t_tensor = torch.full((z_t.shape[0],), t, device=z_t.device)
-#         t_next_tensor = torch.full((z_t.shape[0],), t_next, device=z_t.device)
+    t_steps = torch.linspace(1., 0., S + 1, device=z_T.device)
+    t_pairs = list(zip(t_steps[:-1], t_steps[1:]))
 
-#         logsnr_t     = alpha_cosine_log_snr(t_tensor)
-#         logsnr_next = alpha_cosine_log_snr(t_next_tensor)
+    z_t = z_T
+    for t, t_next in t_pairs:
+        for _ in range(max(jump_n_sample, 1)):
+            t_tensor = torch.full((z_t.shape[0],), t, device=z_t.device)
 
-#         alpha_t, sigma_t = log_snr_to_alpha_sigma(logsnr_t)
-#         alpha_next, sigma_next = log_snr_to_alpha_sigma(logsnr_next)
+            alpha_t, sigma_t = log_snr_to_alpha_sigma(alpha_cosine_log_snr(t_tensor))
+            alpha_next, sigma_next = log_snr_to_alpha_sigma(
+                alpha_cosine_log_snr(torch.full((z_t.shape[0],), t_next, device=z_t.device)))
 
-#         # Reshape for broadcasting: [B, 1, 1, 1, 1]
-#         alpha_t     = alpha_t[:, None, None, None, None]
-#         sigma_t     = sigma_t[:, None, None, None, None]
-#         alpha_next  = alpha_next[:, None, None, None, None]
-#         sigma_next  = sigma_next[:, None, None, None, None]
-        
-#         # Inpaint
-#         noised_z_gt = (z_gt * alpha_next + sigma_next * torch.randn_like(z_gt))
+            alpha_t = alpha_t[:, None, None, None, None]
+            sigma_t = sigma_t[:, None, None, None, None]
+            alpha_next = alpha_next[:, None, None, None, None]
+            sigma_next = sigma_next[:, None, None, None, None]
 
-#         # === Predict x₀ ===
-#         x0_pred = model(z_t, timesteps=t_tensor)
-#         x0_pred = ( mask) * noised_z_gt + (1-mask) * x0_pred
-    
+            noised_z_gt = z_gt * alpha_next + sigma_next * torch.randn_like(z_gt)
 
-#         # === DDIM deterministic update ===
-#         # No stochastic noise added → purely deterministic
-#         z_t = alpha_next * x0_pred + sigma_next * (z_t - alpha_t * x0_pred) / sigma_t
+            x0_pred = model(z_t, timesteps=t_tensor)
+            x0_pred = mask * noised_z_gt + (1 - mask) * x0_pred
 
-#     return z_t
+            z_t = alpha_next * x0_pred + sigma_next * (z_t - alpha_t * x0_pred) / sigma_t
+
+    return z_t
+
+
 @torch.no_grad()
 def ddim_sample_logsnr_cosine(z_T, model, doctree, S=50, predict_mode="x0"):
     """
