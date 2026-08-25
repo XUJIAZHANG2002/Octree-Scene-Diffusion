@@ -1,6 +1,9 @@
 vae_ref:
   checkpoint: "saved_model/vae_model_5.pt"
 
+# Architecture left as shipped: the octree graph UNet is what the notebook
+# inference code builds, and 2079 patches from 14 scenes does not obviously
+# support a much larger model. Capacity is the next knob if quality falls short.
 unet:
   image_size: 16
   model_channels: 64
@@ -10,6 +13,11 @@ unet:
 
 training:
   lr: 1.0e-4
-  t_max: 20
-  save_path: "saved_model/unet_sem_diffusion.pt"
+  epochs: 60           # batch is forced to 1 by the octree build
+  accum_steps: 8       # effective batch 8
+  warmup_steps: 500
+  ema_decay: 0.999
+  grad_clip: 1.0
+  latent_scale: auto   # "auto" measures the VAE latent std; see octree_diff/training/latent_scale.py
+  checkpoint_path: "saved_model/unet_sem_diffusion.pt"
   data_dir: "data/patches_128x128x64_s16"

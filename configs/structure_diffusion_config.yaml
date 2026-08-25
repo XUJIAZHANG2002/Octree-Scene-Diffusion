@@ -2,13 +2,18 @@ vae_ref:
   checkpoint: "saved_model/structure_vae.pt"
 
 unet:
-  in_ch: 2             # Must match VoxelVAE z_channels
+  in_channels: 2             # Must match VoxelVAE z_channels
   base_ch: 128          # Matches your default
   time_emb_dim: 256    # Matches your default
 
 training:
-  lr: 1.0e-4
-  batch_size: 2
-  t_max: 200          
-  save_path: "saved_model/structure_diffusion.pt"
+  lr: 2.0e-4
+  batch_size: 12       # latents are only [2,32,32,32]; batch 2 made the gradient very noisy.
+                       # 12 rather than 16 so sem_diff fits on the same 16 GB card.
+  epochs: 600          # 174 optimiser steps each -> ~104k steps
+  warmup_steps: 500
+  ema_decay: 0.999
+  grad_clip: 1.0
+  latent_scale: auto   # "auto" measures the VAE latent std; see octree_diff/training/latent_scale.py
+  checkpoint_path: "saved_model/structure_diffusion.pt"
   data_dir: "data/split_outputs"

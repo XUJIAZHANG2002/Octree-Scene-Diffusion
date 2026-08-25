@@ -1,0 +1,36 @@
+# Minimal dependency set to run indoor inference and the notebooks.
+#
+# This is the transitive closure of what `inference_scripts/inference_indoor.py`,
+# `utils/sensor_sim.py` and `utils/vis_indoor.py` actually import — much smaller
+# than requirements.txt, which covers the full training/outdoor stack.
+#
+# IMPORTANT: torch and torchvision must be installed FIRST, from the CUDA index,
+# and in the same command. `ocnn` depends on torchvision; if torchvision is
+# missing when ocnn is installed, pip resolves it from PyPI and drags a newer
+# torch along with it, silently replacing a working CUDA build with one your
+# driver cannot run.
+#
+#   conda create -n octree-nb python=3.11 -y && conda activate octree-nb
+#   pip install torch==2.5.1 torchvision==0.20.1 \
+#       --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements-inference.txt
+#
+# cu121 wheels work on driver 525+ (this box runs 570 / CUDA 12.8).
+# Verify with: python -c "import torch; print(torch.cuda.is_available())"
+
+ocnn==2.2.2
+
+numpy==2.0.1
+scipy==1.15.3
+scikit-image==0.25.2
+matplotlib==3.10.3
+trimesh==4.6.11
+einops==0.8.1
+plyfile
+pyyaml
+tqdm
+
+# notebooks
+jupyterlab
+ipykernel
+nbconvert

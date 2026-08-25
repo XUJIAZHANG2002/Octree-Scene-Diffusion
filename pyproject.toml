@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "octree_diff"
+version = "0.1.0"
+description = "Octree Diffusion for Semantic Scene Generation and Completion (ICRA 2026)"
+readme = "README.md"
+requires-python = ">=3.10"
+
+# torch and torchvision are deliberately NOT listed. `ocnn` depends on torchvision,
+# and letting pip resolve the pair from PyPI replaces a working CUDA build with a
+# newer CPU/mismatched one. Install them first from the CUDA index — see
+# requirements-inference.txt for the exact command.
+dependencies = [
+    "ocnn==2.2.2",
+    "numpy",
+    "scipy",
+    "scikit-image",
+    "matplotlib",
+    "trimesh",
+    "einops",
+    "plyfile",
+    "pyyaml",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+notebooks = ["jupyterlab", "ipykernel", "nbconvert"]
+viz = ["open3d"]
+outdoor = ["open3d"]   # velodene_to_voxel voxelises via o3d.geometry.PointCloud
+
+[project.scripts]
+octree-diff = "octree_diff.cli:main"
+
+[project.urls]
+Paper = "https://arxiv.org/abs/2509.16483"
+
+[tool.setuptools.packages.find]
+include = ["octree_diff*"]
+
+[tool.setuptools.package-data]
+"octree_diff.data.kitti" = ["*.yaml"]
