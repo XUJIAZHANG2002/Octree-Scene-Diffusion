@@ -4,18 +4,27 @@ Deliberately does not use Open3D: `utils/util_visual_stuff.py` blocks on a GUI
 window, which is no use in a notebook running over SSH. Everything here renders
 inline and returns a Figure.
 
-Label ids in this dataset are a remapped space, not raw Replica class ids — the
-three dominant classes were identified geometrically (id 1 sits at the bottom of
-every patch, id 3 at the top, id 2 is thin and vertical), so only those are
-named. The rest are shown by id.
+Label ids in this dataset are a remapped space, not raw Replica class ids, but the
+mapping is recoverable: `data/replica_classes.json` is the Replica release's global
+`name_to_id` table inverted, with id 0 (free space, absent there) added. It agrees
+with the three classes that were originally identified geometrically — id 1 sits at
+the bottom of every patch, id 3 at the top, id 2 is thin and vertical — which is
+floor, wall, ceiling.
 """
+
+import json
+import os
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
 FLOOR, WALL, CEILING = 1, 2, 3
-STRUCTURE_NAMES = {0: "empty", FLOOR: "floor", WALL: "wall", CEILING: "ceiling"}
+
+_CLASSES_JSON = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "data", "replica_classes.json")
+with open(_CLASSES_JSON) as _f:
+    CLASS_NAMES = json.load(_f)["names"]
 
 
 def class_colors(num_classes=92, seed=0):
@@ -30,7 +39,9 @@ def class_colors(num_classes=92, seed=0):
 
 
 def label_name(i):
-    return STRUCTURE_NAMES.get(i, f"class {i}")
+    """Human-readable name for a label id; falls back to the id if out of range."""
+    i = int(i)
+    return CLASS_NAMES[i] if 0 <= i < len(CLASS_NAMES) else f"class {i}"
 
 
 def _to_np(x):

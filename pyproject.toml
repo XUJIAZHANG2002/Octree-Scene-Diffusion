@@ -41,4 +41,5 @@ Paper = "https://arxiv.org/abs/2509.16483"
 include = ["octree_diff*"]
 
 [tool.setuptools.package-data]
+"octree_diff.data" = ["*.json"]
 "octree_diff.data.kitti" = ["*.yaml"]
