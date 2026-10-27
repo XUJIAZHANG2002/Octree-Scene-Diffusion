@@ -1,0 +1,47 @@
+# Outdoor (SemanticKITTI) semantic diffusion, trained on the retrained VAE.
+#
+# The UNet geometry is driven by the VAE's depth_in/full_depth, which are 6/3
+# both indoor and outdoor, so configs/v2's architecture would load unchanged.
+# It is scaled up instead, because outdoor latents are the larger target and the
+# card has the room: probed at 200 frames (scratch probe_peak.py),
+#
+#   128/256 [2,2,2]   13.08M   0.130 s/it   4.70 GiB
+#   192/384 [2,2,2]   29.26M   0.211 s/it   7.74 GiB
+#   192/384 [3,3,3]   37.04M   0.267 s/it   7.65 GiB median, 10.66 max
+#   256/512 [3,3,3]      OOM
+#
+# so 192/384 [3,3,3] is the largest that fits with headroom for the densest
+# frames. 60 epochs x 3,834 frames at accum 8 is 28,755 optimiser steps, close
+# to indoor's 31,185, and about 17 h.
+#
+# `image_size` is inert -- UNet3DModel stores it and never reads it -- and is
+# kept only because the factory requires the key.
+# Epoch 19 was both the last and the best held-out epoch, so the per-epoch save
+# and the best-checkpoint save hold identical weights (verified tensor by
+# tensor). The config check requires the name the VAE config writes.
+vae_ref:
+  checkpoint: "saved_model/v2_outdoor/vae_sem_kitti.pt"
+
+unet:
+  image_size: 16
+  model_channels: 192
+  lr_model_channels: 384
+  num_res_blocks: [3, 3, 3]
+  channel_mult: [1, 2]
+
+training:
+  dataset: kitti_ssc
+  data_dir: "data/semantickitti/dataset"
+  stride: 5
+  lr: 1.0e-4
+  epochs: 60
+  accum_steps: 8       # effective batch 8; the octree build forces batch 1
+  warmup_steps: 500
+  ema_decay: 0.999
+  grad_clip: 1.0
+  resume: false
+  # Pinned, not "auto": measured 0.751788 over 60 frames. Leaving it to be
+  # re-measured let it drift between a run and its resume indoor, which
+  # invalidates the checkpoint, since inference divides by this number.
+  latent_scale: 1.330161874580
+  checkpoint_path: "saved_model/v2_outdoor/unet_sem_kitti.pt"

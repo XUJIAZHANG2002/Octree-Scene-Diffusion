@@ -72,6 +72,7 @@ class GraphVAE(torch.nn.Module):
         latent_dim=3,
         num_classes=21,
         patch_size=2,
+        width_mult=1.0,
     ):
         # super().__init__(depth, channel_in, nout, full_depth, depth_stop, depth_out, use_checkpoint, resblk_type, bottleneck,resblk_num)
         # this is to make the encoder and decoder symmetric
@@ -88,6 +89,13 @@ class GraphVAE(torch.nn.Module):
         # self.bottleneck = bottleneck
         self.latent_dim = latent_dim
         self.resblk_num = resblk_num
+        # Per-depth channel widths are otherwise hardcoded; at depth 6 that is
+        # 32 channels and ~0.68M parameters total, which uses 1 GiB of a 16 GiB
+        # card. `width_mult` scales the whole ladder so capacity can be raised
+        # without editing the model. 1.0 reproduces the shipped architecture
+        # exactly, and any other value changes parameter shapes, so a checkpoint
+        # is only loadable by a model built with the same value.
+        self.width_mult = width_mult
 
         self._setup_channels_and_resblks()
         n_edge_type, avg_degree = 7, 7
@@ -207,7 +215,13 @@ class GraphVAE(torch.nn.Module):
             self.resblk_num
         ] * 16  # resblk_num[d] 为深度d（分辨率）下resblock的数量。
         # self.channels = [4, 512, 512, 256, 128, 64, 32, 32, 24, 16, 8]  # depth i的channel为channels[i]
-        self.channels = [4, 512, 512, 256, 128, 64, 32, 32, 24, 8]
+        base = [4, 512, 512, 256, 128, 64, 32, 32, 24, 8]
+        if self.width_mult == 1.0:
+            self.channels = base
+        else:
+            # keep channel counts even; the graph convs assume nothing finer
+            self.channels = [max(4, int(round(c * self.width_mult / 2)) * 2)
+                             for c in base]
 
     def _make_predict_module(self, channel_in, channel_out=2, num_hidden=32):
         return torch.nn.Sequential(

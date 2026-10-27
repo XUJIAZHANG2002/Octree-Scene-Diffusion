@@ -34,6 +34,19 @@ class EMA:
     def state_dict(self):
         return self.shadow.state_dict()
 
+    def load_state_dict(self, sd, step=None):
+        """Restore a saved average, for resuming training.
+
+        `step` matters: the decay warms up as 1 - 1/(step + 1), so a restored
+        average left at step 0 would be almost entirely overwritten by the first
+        few updates. Default to a step past the warmup region so the restored
+        weights keep their intended weight.
+        """
+        self.shadow.load_state_dict(sd)
+        for p in self.shadow.parameters():
+            p.requires_grad_(False)
+        self.step = int(step) if step is not None else int(1.0 / (1.0 - self.decay))
+
 
 def lr_at(step, base_lr, total_steps, warmup_steps):
     """Linear warmup then cosine decay to 5% of the base rate."""

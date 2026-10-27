@@ -45,6 +45,12 @@ def build_semantic_vae(m, device=None):
         latent_dim=m["latent_dim"],
         num_classes=m["total_classes"],
         resblk_num=m["resblk_num"],
+        # Was not passed at all, so the config key was inert and the model
+        # silently used GraphVAE's default of 2. That happened to match the
+        # indoor config, which is why nothing broke -- but setting patch_size: 4
+        # for outdoor did nothing.
+        patch_size=m.get("patch_size", 2),
+        width_mult=m.get("width_mult", 1.0),
     )
     return vae.to(device) if device else vae
 

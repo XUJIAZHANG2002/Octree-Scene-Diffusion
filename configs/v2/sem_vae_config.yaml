@@ -1,0 +1,46 @@
+# Retrain configuration. Differences from configs/sem_vae_config.yaml, each
+# established by the sweeps in out/ab/results.json (3 epochs per arm, evaluated
+# on held-out data/patches_val):
+#
+#   width_mult 8        the shipped model is 0.68M parameters and 32 channels at
+#                       depth 6; capacity, not weighting, was the limit. Held-out
+#                       reconstruction 0.9465 -> 0.9948 micro, 0.8178 -> 0.9653
+#                       macro, and label incoherence 0.0048 -> 0.0007 against a
+#                       real-data figure of 0.0005. 11M params, 3.1 GiB peak.
+#   resblk_num 3        part of the same arm; not separated from width.
+#   latent_dim 32       likewise. Note this also widens the diffusion UNet input.
+#   kl_weight 1e-3      the KL term was previously unweighted and measured 42% of
+#                       the total loss, crushing latent_std to 0.392. 1e-3 is the
+#                       knee: 1e-2 -> 1e-3 gains +0.0028 micro, 1e-3 -> 1e-4 only
+#                       +0.0002.
+#   class weights v2    min_count 10000 + max_ratio 10. Worth ~+0.007 macro on its
+#                       own -- small, but the original file had capping disabled
+#                       and put 61% of the weight mass on 14 classes holding
+#                       0.017% of the voxels.
+#
+# width_mult changes parameter shapes: checkpoints trained here will NOT load
+# into a model built from the original config, and vice versa.
+model:
+  depth_in: 6
+  depth_stop: 6
+  full_depth: 3
+  latent_dim: 32
+  total_classes: 92
+  resblk_num: 3
+  in_channels: 32
+  nout: 2
+  patch_size: 2
+  width_mult: 8.0
+
+training:
+  batch_size: 1
+  lr: 1.0e-4
+  epochs: 20
+  kl_weight: 1.0e-3
+  grad_clip: 1.0
+  class_weights: inv_sqrt
+  class_weights_file: "data/replica_class_counts_v2.pt"
+  val_dir: "data/patches_val"
+  val_n: 16
+  checkpoint_path: "saved_model/v2/vae_sem_v2.pt"
+  data_dir: "data/patches_128x128x64_s16"

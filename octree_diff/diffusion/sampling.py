@@ -10,6 +10,7 @@ with alpha/sigma from `log_snr_schedule_cosine`.
 """
 
 import torch
+import torch.nn.functional as F
 
 from octree_diff.diffusion.util_sample_stuff import log_snr_schedule_cosine, log_snr_to_alpha_sigma
 
@@ -150,3 +151,131 @@ def ddim_inpaint_graph(model, doctree, z_known, mask, steps=100, device="cuda",
                 z_t = z_next
 
     return mask * z_known + (1 - mask) * z_t
+
+
+# --------------------------------------------------------------------------
+# decoder-space guidance (semantic completion where latent pinning cannot work)
+# --------------------------------------------------------------------------
+
+def guidance_weight_at(t, weight, stop_t=0.0, ramp=0.0, max_t=1.0):
+    """Guidance strength at continuous time `t` (1 is noise, 0 is clean).
+
+    Guidance pulls the latent toward satisfying a per-voxel objective, which is
+    not the same as toward the model's manifold. Applied all the way to t=0 it
+    leaves the final latent off-manifold, and the decoder then commits to it:
+    measured on 06:000930, constant guidance doubles the fraction of occupied
+    voxels sharing no label with any neighbour, 0.0108 to 0.0207. Stopping
+    early leaves clean DDIM steps at the end to re-coherate what guidance
+    forced, and costs nothing -- the skipped steps need no decoder pass.
+
+    `stop_t` is where guidance ends, `ramp` how far above that it fades in, and
+    `max_t` suppresses it at high noise where the x0 prediction is meaningless.
+    """
+    t = float(t)
+    if t > max_t:
+        return 0.0
+    if ramp <= 0.0:
+        return 0.0 if t < stop_t else weight
+    return weight * min(1.0, max(0.0, (t - stop_t) / ramp))
+
+
+def guidance_step(x0, decode_logits, target, voxel_weight, weight):
+    """Nudge an x0 prediction so its decoding agrees with observed labels.
+
+    Latent pinning needs a node's latent to be a function of its own patch. The
+    outdoor semantic encoder is a graph network, so it is not: see
+    `docs/outdoor-semantic-conditioning.md`. Guidance avoids the problem by
+    never touching the encoder -- it measures the disagreement where the
+    observation actually lives, in decoded label space, and backpropagates.
+
+    `decode_logits(x0) -> [N, C, P, P]` is supplied by the caller so this module
+    stays free of the VAE. `target` is [N, P, P] of class ids and `voxel_weight`
+    is [N, P, P] of per-voxel loss weights, zero where nothing was observed.
+    Weighting rather than masking is what lets the caller hold down the
+    observed-free voxels, which outnumber the hits 4:1 and otherwise make the
+    objective mostly "be empty".
+
+    `weight` is the fraction of x0's norm moved per step: the raw gradient is
+    renormalised, so the same weight means the same thing at every noise level
+    and across scenes, which a bare learning rate would not.
+
+    Uses `loss.backward()` rather than `torch.autograd.grad`, because the graph
+    convolutions checkpoint themselves through `ckpt_conv_wrapper` with
+    `use_reentrant=True`, and that is incompatible with `grad()`. Freeze the
+    decoder's parameters before sampling so the backward pass only reaches `x`.
+    """
+    total = voxel_weight.sum()
+    if weight == 0.0 or not bool(total > 0):
+        return x0, float("nan")
+
+    with torch.enable_grad():
+        x = x0.detach().requires_grad_(True)
+        logits = decode_logits(x)
+        if logits.shape[0] != target.shape[0]:
+            raise ValueError(
+                f"decoder returned {logits.shape[0]} nodes but the target has "
+                f"{target.shape[0]}; the node orders must match")
+        per_voxel = F.cross_entropy(logits, target, reduction="none")
+        loss = (per_voxel * voxel_weight).sum() / total
+        loss.backward()
+        grad = x.grad
+    if grad is None:
+        return x0, float(loss)
+
+    gn = grad.norm()
+    if not torch.isfinite(gn) or gn == 0:
+        return x0, float(loss)
+    return x0 - (weight * x0.norm() / gn) * grad, float(loss)
+
+
+@torch.no_grad()
+def ddim_guided_graph(model, doctree, decode_logits, target, voxel_weight,
+                      n_nodes=None, latent_dim=None, steps=100, device="cuda",
+                      eta=0.0, weight=0.1, inner=1, stop_t=0.0, ramp=0.0,
+                      max_t=1.0, z_T=None, verbose=False):
+    """DDIM on per-node latents, with the observation applied as guidance.
+
+    Shape-compatible with `ddim_sample_graph`; pass `z_T` or give
+    `n_nodes`/`latent_dim` so the initial noise can be drawn.
+
+    `inner` repeats the guidance step within one DDIM step, which buys
+    agreement without extra model evaluations -- only extra decoder passes, and
+    recomputing the gradient after moving is worth much more than taking one
+    larger step along a stale one. `stop_t`/`ramp`/`max_t` schedule the strength
+    over the trajectory; see `guidance_weight_at`.
+    """
+    if z_T is None:
+        if n_nodes is None or latent_dim is None:
+            raise ValueError("pass z_T, or both n_nodes and latent_dim")
+        z_t = torch.randn(n_nodes, latent_dim, device=device)
+    else:
+        z_t = z_T.to(device)
+
+    target = target.to(device)
+    voxel_weight = voxel_weight.to(device).float()
+    guided_steps = 0
+
+    for i, (t, t_next) in enumerate(time_pairs(steps, device)):
+        tb = t.view(1)
+        a_t, s_t = alpha_sigma(tb)
+        a_next, s_next = alpha_sigma(t_next.view(1))
+
+        x0 = model(z_t, doctree=doctree, timesteps=tb)
+
+        w = guidance_weight_at(t, weight, stop_t, ramp, max_t)
+        loss = float("nan")
+        if w > 0.0:
+            guided_steps += 1
+            for _ in range(max(inner, 1)):
+                x0, loss = guidance_step(x0, decode_logits, target,
+                                         voxel_weight, w)
+
+        z_t = ddim_step(z_t, x0, a_t, s_t, a_next, s_next, eta)
+
+        if verbose and (i % max(steps // 10, 1) == 0 or i == steps - 1):
+            print(f"    step {i + 1:3d}/{steps}  t={float(t):.3f}  w={w:.3f}  "
+                  f"observed-voxel CE {loss:.4f}")
+
+    if verbose:
+        print(f"    guided {guided_steps}/{steps} steps")
+    return z_t

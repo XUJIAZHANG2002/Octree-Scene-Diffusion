@@ -4,19 +4,22 @@ The outdoor counterpart to export_web_scenes.py. Same encoding, same manifest
 shape, so the viewer needs no changes -- it reads dims, palette, class names and
 the variant list out of the manifest.
 
-Two differences from indoor, both forced by the data:
+One difference from indoor, forced by the data:
 
-1. **Two variants, not three.** SemanticKITTI's dense voxel ground truth lives in
-   a `sequences/*/voxels/` download we do not have; only raw scans and per-point
-   labels are here. So there is `observed` (one LiDAR sweep, voxelised) and
-   `completed`, and no `truth` panel. Aggregating neighbouring sweeps via
-   poses.txt would approximate one, but it would not be the official ground
-   truth and should not be labelled as such.
+**The observation is the scan itself**, not a mask over a complete scene. A
+single sweep fills about 0.6% of the volume. The known region is recovered by
+tracing back from each hit to the sensor origin, marking everything on the way
+as observed-empty -- so "unknown" means genuinely occluded, not just empty.
 
-2. **The observation is the scan itself**, not a mask over a complete scene. A
-   single sweep fills about 0.6% of the volume. The known region is recovered by
-   tracing back from each hit to the sensor origin, marking everything on the way
-   as observed-empty -- so "unknown" means genuinely occluded, not just empty.
+The `truth` panel comes from SemanticKITTI's own SSC voxel labels under
+`<data>/dataset/sequences/*/voxels/`. They are co-aligned with the voxelisation
+here, not merely assumed to be: on 00:000202 and 08:000100, 99% of the scan's
+occupied voxels fall on voxels the ground truth also calls occupied, with 98%
+label agreement, and shifting the ground truth by two voxels along any axis
+drops that to 0.20-0.85. Voxels the `.invalid` mask marks as outside the
+sensor's traversal have no defined label -- a mean of 29% of each volume, from 4%
+to 62% -- and are rendered as empty, so the truth panel is itself sparse in
+exactly the regions the completion has most to say about.
 
 Needs the `octfusion` environment: open3d for voxelisation, numba for the trace.
 
@@ -74,8 +77,16 @@ def _dda_trace_mark_free(occ, ox, oy, oz, hx, hy, hz):
         if 0 <= x < H and 0 <= y < W and 0 <= z < D:
             if occ[x, y, z] == -1:
                 occ[x, y, z] = 0
-            elif occ[x, y, z] == 0:
-                break          # already carved; the rest of this ray is done
+            # No early exit on an already-carved voxel. It looks safe -- another
+            # ray has been here, so the rest of the path is done -- but that
+            # only holds if the other ray continued along *this* ray's remaining
+            # path, and rays from the same origin in different directions do
+            # not. It under-carved, and because `_carve` runs the rays in
+            # `prange`, which ray reached a voxel first depended on thread
+            # scheduling, so the whole observation was nondeterministic:
+            # 35,244 voxels differed between two calls in one process. Writing
+            # only -1 -> 0 and never reading back makes the pass idempotent and
+            # order-independent, so it is now reproducible as well as correct.
         else:
             break
         if tx <= ty and tx <= tz:
@@ -150,10 +161,89 @@ def reduce_patches_tri_state(occ, patch=PATCH):
 
 # --------------------------------------------------------------------- models
 
+def _struct(weights, device):
+    """The outdoor structure UNet, unchanged -- it was not retrained."""
+    from octree_diff.models.outdoor.graph_unet_lr import UNet3DModel as StructUNet
+
+    struct = StructUNet(full_depth=4, in_split_channels=8, model_channels=32,
+                        out_split_channels=8, attention_resolutions=[2, 4, 8],
+                        dims=3, num_heads=4).to(device)
+    struct.load_state_dict(torch.load(os.path.join(weights, "structure_model.pt"),
+                                      map_location=device))
+    struct.eval()
+    return struct
+
+
+class DDPMStructure:
+    """The 1000-step structure model, which samples the split grid differently.
+
+    `SemCityOcto/checkpoints/structure_ddpm_ep110.pt`: 62.8M parameters, an
+    epsilon-predictor on a linear beta schedule over a one-channel `[32,32,16]`
+    split-big grid. It is the structure model the paper's outdoor FID notebook
+    sampled from; `_struct`'s 15.7M DDIM model is the one notebook 01 used for
+    completion. EMA weights are loaded when the checkpoint carries them.
+    """
+
+    def __init__(self, weights, device, ckpt="checkpoints/structure_ddpm_ep110.pt"):
+        from octree_diff.diffusion.ddpm import ddpm_schedule
+        from octree_diff.models.outdoor.graph_unet_lr import UNet3DModel as StructUNet
+
+        self.model = StructUNet(full_depth=4, in_split_channels=1, model_channels=64,
+                                out_split_channels=1, channel_mult=(1, 2, 4, 8),
+                                attention_resolutions=[2, 4, 8], dims=3, num_heads=4,
+                                timestep_repr="ddpm", T=1000).to(device)
+        state = torch.load(os.path.join(weights, ckpt), map_location=device, weights_only=True)
+        self.model.load_state_dict(state["model"])
+        if "ema_shadow" in state:
+            params = dict(self.model.named_parameters())
+            with torch.no_grad():
+                for k, v in state["ema_shadow"].items():
+                    params[k].copy_(v)
+        self.model.eval()
+        self.ckpt = ckpt
+        self.sched = ddpm_schedule(1000, device)
+        self.resample = 1           # RePaint repeats per step when inpainting
+
+    def sample_split(self, device):
+        """An unconditional draw as the `[1,8,16,16,8]` split the DDIM model emits."""
+        from octree_diff.diffusion.ddpm import sample_ddpm
+        from octree_diff.octree.util_octree_stuff import splitbig2split
+
+        big = torch.full((1, 1, 32, 32, 32), -1.0, device=device)
+        big[..., 0:16] = sample_ddpm(self.model, (1, 1, 32, 32, 16), self.sched, device)
+        return splitbig2split(big)[..., 0:8]
+
+    @staticmethod
+    def _to_big(split8, fill):
+        """[1,8,16,16,8] split (or mask) -> the model's [1,1,32,32,16] layout."""
+        from octree_diff.octree.util_octree_stuff import split2splitbig
+        s = torch.full((1, 8, 16, 16, 16), float(fill), device=split8.device)
+        s[..., 0:8] = split8
+        return split2splitbig(s)[..., 0:16]
+
+    def inpaint_split(self, z_known, mask, device, resample=1):
+        """Complete the split where `mask` is 0, holding it to `z_known` where 1."""
+        from octree_diff.diffusion.ddpm import inpaint_ddpm
+        from octree_diff.octree.util_octree_stuff import splitbig2split
+
+        big = torch.full((1, 1, 32, 32, 32), -1.0, device=device)
+        big[..., 0:16] = inpaint_ddpm(self.model, self._to_big(z_known.to(device), -1.0),
+                                      self._to_big(mask.to(device), 0.0), self.sched,
+                                      device, resample=resample)
+        return splitbig2split(big)[..., 0:8]
+
+
+def load_structure(weights, device, kind="ddim"):
+    return DDPMStructure(weights, device) if kind == "ddpm" else _struct(weights, device)
+
+
 def load_models(weights, device):
+    """The shipped outdoor semantic models, at the geometry they were trained at.
+
+    Trained before latent scaling existed, so their latent scale is 1.0.
+    """
     from octree_diff.models.semantic.graph_sem_vae import GraphVAE
     from octree_diff.models.semantic.graph_unet_hr import UNet3DModel as SemUNet
-    from octree_diff.models.outdoor.graph_unet_lr import UNet3DModel as StructUNet
 
     vae = GraphVAE(depth=DEPTH, channel_in=32, nout=2, full_depth=FULL_DEPTH,
                    depth_stop=DEPTH, depth_out=DEPTH, latent_dim=LATENT_DIM,
@@ -171,13 +261,43 @@ def load_models(weights, device):
                                    map_location=device))
     sem.eval()
 
-    struct = StructUNet(full_depth=4, in_split_channels=8, model_channels=32,
-                        out_split_channels=8, attention_resolutions=[2, 4, 8],
-                        dims=3, num_heads=4).to(device)
-    struct.load_state_dict(torch.load(os.path.join(weights, "structure_model.pt"),
-                                      map_location=device))
-    struct.eval()
-    return vae, sem, struct
+    return vae, sem, _struct(weights, device), LATENT_DIM, 1.0
+
+
+def load_models_from_config(config_dir, weights, device, structure="ddim"):
+    """The retrained outdoor semantic models, built from a config directory.
+
+    Returns the latent dimension and scale alongside, because both differ from
+    the shipped pair: latent_dim 32 rather than 8, and a latent scale that is
+    emphatically not 1.0. The diffusion model was trained on latents multiplied
+    by it, so a sample must be divided by it again before the VAE decodes --
+    skipping that step hands the decoder latents a third too large.
+    """
+    from octree_diff.config import load_config
+    from octree_diff.models.factory import build_semantic_unet, build_semantic_vae
+    from octree_diff.training.latent_scale import load_latent_scale
+
+    v_cfg = load_config(os.path.join(config_dir, "sem_vae_config.yaml"))
+    d_cfg = load_config(os.path.join(config_dir, "sem_diffusion_config.yaml"))
+    m = v_cfg["model"]
+    if (m["patch_size"], m["depth_in"], m["full_depth"]) != (PATCH, DEPTH, FULL_DEPTH):
+        raise ValueError(
+            f"config geometry ({m['patch_size']}, {m['depth_in']}, {m['full_depth']}) "
+            f"differs from this exporter's ({PATCH}, {DEPTH}, {FULL_DEPTH}); the "
+            f"voxel<->octree helpers here close over the module-level constants")
+
+    vae = build_semantic_vae(m, device)
+    vae.load_state_dict(torch.load(os.path.join(REPO, v_cfg["training"]["checkpoint_path"]),
+                                   map_location=device, weights_only=True))
+    vae.eval()
+
+    sem = build_semantic_unet(m, d_cfg["unet"], device)
+    ckpt = os.path.join(REPO, d_cfg["training"]["checkpoint_path"])
+    sem.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
+    sem.eval()
+
+    scale = load_latent_scale(os.path.splitext(ckpt)[0] + "_meta.yaml")
+    return vae, sem, load_structure(weights, device, structure), m["latent_dim"], scale
 
 
 def _to_split(vol):
@@ -186,6 +306,30 @@ def _to_split(vol):
     from octree_diff.octree.util_octree_stuff import points2octree, voxel_grid_to_points
     octree = points2octree(voxel_grid_to_points(vol), depth=DEPTH, full_depth=FULL_DEPTH)
     return octree2split_small(octree, 4)[:, :, :, :, 0:8]
+
+
+def split_to_octree(split):
+    """[1,8,16,16,16] split grid -> a depth-6 octree matching the training graph.
+
+    The outdoor twin of `pipeline.split_big_to_octree`. `split2octree_small`
+    builds on a grid that is full at depth 4 (4096 nodes), and the notebooks'
+    `create_child_octree` keeps that dense layer; the semantic models were
+    trained on `points2octree(..., full_depth=3)` octrees, which hold ~1,200-1,400
+    depth-4 nodes on a KITTI frame. That added ~2,500 dual-graph nodes (+7-10%)
+    the UNet never saw. Rebuilding from the depth-6 node set reproduces the
+    training graph; depths 5 and 6 are unchanged, which is asserted.
+    """
+    from octree_diff.octree.util_dualoctree import split2octree_small
+    from octree_diff.octree.util_octree_stuff import points2octree, voxel_grid_to_points
+
+    octree_s = split2octree_small(split, DEPTH, 4)
+    x, y, z, _ = octree_s.xyzb(DEPTH, nempty=False)
+    res = 2 ** DEPTH
+    mask = torch.zeros((res, res, res))
+    mask[x.long(), y.long(), z.long()] = 1
+    octree = points2octree(voxel_grid_to_points(mask), depth=DEPTH, full_depth=FULL_DEPTH)
+    assert (octree.nnum[DEPTH - 1:DEPTH + 1] == octree_s.nnum[DEPTH - 1:DEPTH + 1]).all()
+    return octree
 
 
 def conditioning(occ):
@@ -210,29 +354,114 @@ def conditioning(occ):
     return _to_split(padded_z), mask
 
 
+def guidance_targets(labels, known, octree, device):
+    """Per-node (label, observed) patches in the octree's node order.
+
+    `reconstruct_voxel_from_patch` reads the decoder's logits with
+    `octree.xyzb(DEPTH, nempty=False)`, so indexing the patched volumes the same
+    way puts the targets in the decoder's own row order -- no voxel-space
+    round trip, and nothing to misalign.
+    """
+    from octree_diff.octree.util_octree_stuff import voxel_to_patch
+
+    side = 64 * PATCH
+    pad_l = torch.zeros((1, side, side, 64), dtype=torch.long)
+    pad_k = torch.zeros((1, side, side, 64), dtype=torch.long)
+    pad_l[0, :GRID[0], :GRID[1], :GRID[2]] = torch.from_numpy(labels).long()
+    pad_k[0, :GRID[0], :GRID[1], :GRID[2]] = torch.from_numpy(known).long()
+
+    tl = voxel_to_patch(pad_l, PATCH)[0].to(device)            # [64,64,64,P,P]
+    tk = voxel_to_patch(pad_k, PATCH)[0].to(device).bool()
+
+    x, y, z, _ = octree.xyzb(DEPTH, nempty=False)
+    x, y, z = x.long(), y.long(), z.long()
+    return tl[x, y, z], tk[x, y, z]                            # [N,P,P] each
+
+
+def guidance_weights(target, target_mask, free_weight):
+    """Per-voxel loss weights, holding down the observed-free voxels.
+
+    Ray traversal clears far more volume than it hits -- 4.2 observed-free
+    voxels per hit inside the completed octree on 06:000930 -- so an unweighted
+    mean makes the objective 81% "be empty". The structure stage has already
+    pinned occupancy from the same observation, exactly and at every hit, so
+    that pressure is largely redundant here; what guidance uniquely supplies is
+    the *labels*. `free_weight=0` asks only for labels.
+    """
+    w = target_mask.float()
+    if free_weight != 1.0:
+        w = torch.where(target == 0, w * float(free_weight), w)
+    return w
+
+
 @torch.no_grad()
-def synthesize(z_known, mask, vae, sem, struct, device, steps, resample):
-    """Structure diffusion (masked where `mask` is set) then latent semantics."""
+def synthesize(z_known, mask, vae, sem, struct, device, steps, resample,
+               latent_dim=LATENT_DIM, latent_scale=1.0, guidance=None,
+               sampler="legacy", verbose=False):
+    """Structure diffusion (masked where `mask` is set) then latent semantics.
+
+    `guidance` is a dict of `labels`, `known` and the sampler's guidance
+    settings; it completes the *semantics* too, by pushing the decoded labels
+    toward the observation. That is mode 4. Without it the semantic stage is
+    sampled from the prior, which completes geometry only -- and because label 0
+    is free, also deletes observed voxels the structure stage kept. See
+    `docs/outdoor-semantic-conditioning.md`.
+    """
+    from octree_diff.diffusion.sampling import ddim_guided_graph
     from octree_diff.diffusion.util_sample_stuff import (
         ddim_sample_logsnr_cosine, ddim_sample_structure_logsnr_cosine_inpaint)
     from octree_diff.models.semantic.dual_octree import DualOctree
-    from octree_diff.octree.util_dualoctree import split2octree_small
     from octree_diff.octree.util_octree_stuff import reconstruct_voxel_from_patch
 
-    z_T = torch.randn(1, 8, 16, 16, 8, device=device)
-    sample = ddim_sample_structure_logsnr_cosine_inpaint(
-        z_T, z_known.to(device), struct, mask.to(device), S=steps, jump_n_sample=resample)
+    if guidance is not None or sampler != "legacy":
+        # Guidance backpropagates through the decoder; freeze it so the pass
+        # only reaches the latent and no parameter grads are accumulated.
+        for prm in vae.parameters():
+            prm.requires_grad_(False)
+
+    if isinstance(struct, DDPMStructure):
+        # `resample` is the DDIM sampler's per-step RePaint count; the DDPM
+        # sampler takes 1000 steps rather than 50, so it gets its own
+        # (`struct.resample`), set from --ddpm-resample.
+        sample = (struct.inpaint_split(z_known, mask, device, struct.resample)
+                  if mask.any() else struct.sample_split(device))
+    else:
+        z_T = torch.randn(1, 8, 16, 16, 8, device=device)
+        sample = ddim_sample_structure_logsnr_cosine_inpaint(
+            z_T, z_known.to(device), struct, mask.to(device), S=steps, jump_n_sample=resample)
     sample = torch.where(sample > 0, 1.0, -1.0)
 
     split = torch.ones((1, 8, 16, 16, 16)) * -1
     split[:, :, :, :, 0:8] = sample.cpu()
-    octree = split2octree_small(split, DEPTH, 4)
+    octree = split_to_octree(split).to(device)
 
-    doctree = DualOctree(vae.create_child_octree(octree).to(device))
+    doctree = DualOctree(octree)
     doctree.post_processing_for_docnn()
-    z = ddim_sample_logsnr_cosine(torch.randn(doctree.total_num, LATENT_DIM).to(device),
-                                  model=sem, doctree=doctree, S=steps)
-    out = vae.decode_code(z, doctree, update_octree=False, pos=None)
+    z_init = torch.randn(doctree.total_num, latent_dim).to(device)
+
+    def decode(code):
+        # Training multiplied the VAE's latents by this; undo it before decoding.
+        return vae.decode_code(code / latent_scale, doctree,
+                               update_octree=False, pos=None)
+
+    if guidance is None and sampler == "legacy":
+        z = ddim_sample_logsnr_cosine(z_init, model=sem, doctree=doctree, S=steps)
+    else:
+        g = dict(labels=np.zeros(GRID, np.int32), known=np.zeros(GRID, bool),
+                 weight=0.0, inner=1, free_weight=1.0, stop_t=0.0, ramp=0.0,
+                 max_t=1.0)
+        g.update(guidance or {})
+        target, target_mask = guidance_targets(g["labels"], g["known"],
+                                               octree.to(device), device)
+        voxel_weight = guidance_weights(target, target_mask, g["free_weight"])
+        z = ddim_guided_graph(sem, doctree,
+                              lambda code: decode(code)["sem_voxs"][DEPTH],
+                              target, voxel_weight, z_T=z_init, steps=steps,
+                              device=device, weight=g["weight"], inner=g["inner"],
+                              stop_t=g["stop_t"], ramp=g["ramp"],
+                              max_t=g["max_t"], verbose=verbose)
+
+    out = decode(z)
     vox = reconstruct_voxel_from_patch(out["sem_voxs"], octree.to(device),
                                        depth=DEPTH, shape=(1,) + GRID, patch_size=PATCH)
     return vox[0].detach().cpu().numpy().astype(np.int32)
@@ -252,13 +481,24 @@ def dense_conditioning(labels, keep_frac):
 
 # --------------------------------------------------------------------- driver
 
+def guidance_opts(args):
+    """The guidance settings, in one place so the manifest cannot drift."""
+    return dict(weight=args.guidance_weight, inner=args.guidance_inner,
+                free_weight=args.guidance_free_weight,
+                stop_t=args.guidance_stop_t, ramp=args.guidance_ramp)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--mode", default="complete",
-                    choices=["complete", "generate", "extend"])
-    ap.add_argument("--data", default="/home/brendan/SemCityOcto/dataset")
-    ap.add_argument("--weights", default="/home/brendan/SemCityOcto")
+    ap.add_argument("--mode", default="complete-geometry",
+                    help="one of the five execution models, by name or number; "
+                         "pass --mode list to print the table")
+    ap.add_argument("--data", default=os.path.join(REPO, "data", "semantickitti"),
+                    help="SemanticKITTI root, the folder holding dataset/sequences")
+    ap.add_argument("--weights", default=os.path.join(REPO, "saved_model", "semcity"),
+                    help="outdoor structure checkpoints: structure_model.pt and "
+                         "checkpoints/structure_ddpm_ep110.pt")
     ap.add_argument("--frames", nargs="+", default=["00:000202"],
                     help="sequence:scan pairs, e.g. 00:000202")
     ap.add_argument("--samples", type=int, default=4, help="generate: how many")
@@ -268,9 +508,62 @@ def main(argv=None):
     ap.add_argument("--steps", type=int, default=50)
     ap.add_argument("--resample", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--guidance-weight", dest="guidance_weight", type=float,
+                    default=0.15,
+                    help="mode 4/5: fraction of the latent's norm moved toward "
+                         "the observation at each step. 0 disables guidance, "
+                         "which makes mode 4 identical to mode 3")
+    ap.add_argument("--guidance-inner", dest="guidance_inner", type=int, default=3,
+                    help="guidance steps per DDIM step; costs one decoder pass "
+                         "each, no extra UNet evaluations")
+    ap.add_argument("--guidance-free-weight", dest="guidance_free_weight",
+                    type=float, default=0.0,
+                    help="weight on observed-FREE voxels relative to hits. The "
+                         "structure stage already pins occupancy, so the default "
+                         "0 asks guidance for labels only; 1 is unweighted. Any "
+                         "value above ~0 reintroduces label speckle -- measured, "
+                         "0.02 is already most of the way to 1.0")
+    ap.add_argument("--guidance-stop-t", dest="guidance_stop_t", type=float,
+                    default=0.20,
+                    help="stop guiding below this diffusion time, leaving the "
+                         "last steps unguided. A LiDAR sweep's returns lie on "
+                         "rings, so guidance pins labels on the rings while the "
+                         "voxels between them follow the prior, and the "
+                         "disagreement shows as concentric striping. The unguided "
+                         "tail resolves across it. 0 guides to t=0 and stripes")
+    ap.add_argument("--guidance-ramp", dest="guidance_ramp", type=float,
+                    default=0.15, help="fade guidance in over this much t above "
+                                       "--guidance-stop-t")
+    ap.add_argument("--structure", default="ddpm", choices=["ddim", "ddpm"],
+                    help="'ddim': structure_model.pt, 50 DDIM steps, the model "
+                         "notebook 01 completes with. 'ddpm': the 1000-step "
+                         "structure_ddpm_ep110.pt the paper's FID notebook samples "
+                         "from; inpaints RePaint-style for modes 3-5")
+    ap.add_argument("--ddpm-resample", dest="ddpm_resample", type=int, default=3,
+                    help="--structure ddpm only: RePaint repeats per step when "
+                         "inpainting; each one costs another 1000 model passes")
+    ap.add_argument("--semantic-sampler", dest="semantic_sampler",
+                    default="legacy", choices=["legacy", "guided"],
+                    help="'legacy' keeps util_sample_stuff's stochastic sampler "
+                         "for the unconditioned modes; 'guided' uses the DDIM "
+                         "sampler on the schedule the model was trained with")
     ap.add_argument("--device", default=None)
+    ap.add_argument("--config-dir", dest="config_dir", default=None,
+                    help="e.g. configs/v2_outdoor for the retrained semantic "
+                         "models; without it the shipped weights are used")
     args = ap.parse_args(argv)
 
+    from octree_diff.inference import modes
+    if str(args.mode).lower() == "list":
+        print("outdoor execution models:\n" + modes.describe("outdoor"))
+        return
+    try:
+        args.mode = modes.resolve(args.mode, "outdoor")
+    except ValueError as e:
+        sys.exit(str(e))
+    modes.announce("outdoor", args.mode)
+
+    from octree_diff.data.kitti.ssc_dataset import _unpack_bits
     from octree_diff.data.kitti.velodyne_to_voxel import velodene_to_voxel
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -288,14 +581,46 @@ def main(argv=None):
         class_names[learn_id] = names[raw]
         palette[learn_id] = list(colors[raw][::-1])   # the yaml stores BGR
 
+    # raw SemanticKITTI ids -> the 0..19 learning space, for the SSC voxel labels
+    lm = km["learning_map"]
+    remap = np.zeros(max(lm) + 1, dtype=np.int64)
+    for raw, learn in lm.items():
+        remap[raw] = learn
+
     print("loading models...")
-    vae, sem, struct = load_models(args.weights, device)
+    if args.config_dir:
+        vae, sem, struct, latent_dim, latent_scale = load_models_from_config(
+            args.config_dir, args.weights, device, args.structure)
+        if isinstance(struct, DDPMStructure):
+            struct.resample = args.ddpm_resample
+        print(f"  retrained from {args.config_dir}: latent_dim {latent_dim}, "
+              f"latent scale {latent_scale:.4f}")
+    else:
+        vae, sem, struct, latent_dim, latent_scale = load_models(args.weights, device)
+        print(f"  shipped weights: latent_dim {latent_dim}, latent scale {latent_scale:.4f}")
 
     def load_frame(spec):
         seq, scan = spec.split(":")
         vol = np.asarray(velodene_to_voxel(args.data, seq, scan)).astype(np.int32)
         vol[vol == 255] = 0                 # 255 marks invalid, not a class
         return seq, scan, vol
+
+    def load_truth(spec):
+        """SSC voxel ground truth for one frame, invalid voxels zeroed.
+
+        Same learning space as the voxelised scan (0 free, 1..19 classes), so it
+        encodes with the same palette. `.invalid` voxels have no defined label
+        and become 0 rather than being drawn; the fraction is returned so the
+        manifest can record how much of the panel that removes.
+        """
+        seq, scan = spec.split(":")
+        d = os.path.join(args.data, "dataset", "sequences", seq, "voxels")
+        raw = np.fromfile(os.path.join(d, f"{scan}.label"), dtype=np.uint16)
+        vol = remap[raw].reshape(GRID).astype(np.int32)
+        inv = _unpack_bits(np.fromfile(os.path.join(d, f"{scan}.invalid"),
+                                       dtype=np.uint8)).reshape(GRID) == 1
+        vol[inv] = 0
+        return vol, float(inv.mean())
 
     def emit(sid, name, vol):
         buf = encode(vol)
@@ -307,7 +632,7 @@ def main(argv=None):
 
     scenes, variants = [], None
 
-    if args.mode == "generate":
+    if args.mode == modes.GENERATE:
         variants = [{"key": "sample", "label": "Generated",
                      "hint": "sampled from noise, nothing observed"}]
         zeros = torch.zeros(1, 8, 16, 16, 8)
@@ -315,7 +640,7 @@ def main(argv=None):
             torch.manual_seed(args.seed + i)
             print(f"sample_{i:02d}: generating...")
             vol = synthesize(zeros, zeros, vae, sem, struct, device,
-                             args.steps, 1)
+                             args.steps, 1, latent_dim, latent_scale)
             scenes.append({
                 "id": f"sample_{i:02d}", "scene": f"sample {i}",
                 "occupied_voxels": int((vol > 0).sum()),
@@ -323,31 +648,41 @@ def main(argv=None):
                 "variants": {"sample": emit(f"sample_{i:02d}", "sample", vol)},
             })
 
-    elif args.mode == "extend":
+    elif args.mode == modes.EXTEND:
         variants = [{"key": "input", "label": "Known region",
-                     "hint": f"the first {args.keep:.0%} of the scene is held fixed"},
+                     "hint": f"the first {args.keep:.0%} of the scene, given as ground truth"},
                     {"key": "extended", "label": "Extended",
                      "hint": "the rest generated by outpainting"}]
         for spec in args.frames:
-            seq, scan, labels = load_frame(spec)
+            seq, scan = spec.split(":")
             sid = f"{seq}_{scan}"
-            cut = int(round(labels.shape[0] * args.keep))
 
-            # Outpaint from a dense canvas, not from the raw sweep. A single scan
-            # has no hits beyond x=192 here, so cutting it at 75% removes nothing
-            # and "extend" would just be "complete" under another name. Completing
-            # first gives the dense scene the paper outpaints from.
-            print(f"{spec}: completing to build the canvas...")
-            torch.manual_seed(args.seed)
-            z0, m0 = conditioning(observed_state(labels))
-            canvas = synthesize(z0, m0, vae, sem, struct, device,
-                                args.steps, args.resample)
-
-            print(f"  outpainting the last {1 - args.keep:.0%} of x...")
+            # Mode 5 extends a full ground-truth map: SemanticKITTI's dense SSC
+            # labels for the frame, `.invalid` voxels empty. (This used to
+            # complete a single scan into a canvas first, with the semantic
+            # stage unconditioned -- a model output, not ground truth.)
+            canvas, inv_frac = load_truth(spec)
+            cut = int(round(canvas.shape[0] * args.keep))
+            print(f"{spec}: ground truth ({inv_frac:.0%} invalid); "
+                  f"outpainting the last {1 - args.keep:.0%} of x...")
             torch.manual_seed(args.seed + 1)
-            z_known, mask = conditioning(dense_conditioning(canvas, args.keep))
+            occ_ext = dense_conditioning(canvas, args.keep)
+            z_known, mask = conditioning(occ_ext)
+            # The kept half is observed, labels and all, so the same guidance
+            # that completes a scan's semantics also stops the extension from
+            # relabelling what it was told to keep.
             grown = synthesize(z_known, mask, vae, sem, struct, device,
-                               args.steps, args.resample)
+                               args.steps, args.resample, latent_dim, latent_scale,
+                               guidance=(dict(labels=canvas, known=occ_ext != -1,
+                                              **guidance_opts(args))
+                                         if args.guidance_weight > 0 else None),
+                               sampler=args.semantic_sampler)
+            if args.guidance_weight > 0:
+                kept_m = (np.arange(canvas.shape[0])[:, None, None] < cut) & (canvas > 0)
+                print(f"  of the kept half's {int(kept_m.sum()):,} voxels: "
+                      f"{float((grown[kept_m] > 0).mean()):.3f} still occupied, "
+                      f"{float((grown[kept_m] == canvas[kept_m]).mean()):.3f} "
+                      f"keep their label")
             known_only = canvas.copy()
             known_only[cut:] = 0
             scenes.append({
@@ -355,34 +690,98 @@ def main(argv=None):
                 "occupied_voxels": int((grown > 0).sum()),
                 "classes": int(len(np.unique(grown[grown > 0]))),
                 "keep_fraction": args.keep,
+                "invalid_fraction": round(inv_frac, 4),
                 "variants": {"input": emit(sid, "input", known_only),
                              "extended": emit(sid, "extended", grown)},
             })
 
-    else:
+    elif args.mode == modes.SEMANTICS_FROM_STRUCTURE:
+        # The ground-truth layout is observed everywhere, so the structure mask
+        # is fully on and the structure stage reproduces it; only the semantic
+        # stage is sampled. This is the cleanest look at what the semantic
+        # prior does on its own, with the geometry taken out of the question.
+        variants = [{"key": "layout", "label": "Given layout",
+                     "hint": "ground-truth geometry, labels discarded"},
+                    {"key": "labelled", "label": "Labelled",
+                     "hint": "semantics sampled onto that layout"}]
+        for spec in args.frames:
+            seq, scan = spec.split(":")
+            sid = f"{seq}_{scan}"
+            truth, invalid = load_truth(spec)
+            occ = (truth > 0).astype(np.int8)       # nothing unknown
+            print(f"{spec}: labelling the ground-truth layout "
+                  f"({int((truth > 0).sum()):,} occupied voxels)...")
+            torch.manual_seed(args.seed)
+            z_known, mask = conditioning(occ)
+            if not bool((mask > 0).all()):
+                print(f"  warning: {float((mask > 0).float().mean()):.3f} of the "
+                      f"structure mask is set, not all of it; the layout will "
+                      f"only be approximately reproduced")
+            done = synthesize(z_known, mask, vae, sem, struct, device,
+                              args.steps, args.resample, latent_dim, latent_scale)
+            scenes.append({
+                "id": sid, "scene": f"sequence {seq}, scan {scan}",
+                "occupied_voxels": int((truth > 0).sum()),
+                "classes": int(len(np.unique(done[done > 0]))),
+                "volume_invalid": round(invalid, 4),
+                "variants": {"layout": emit(sid, "layout", (truth > 0).astype(np.int32)),
+                             "labelled": emit(sid, "labelled", done)},
+            })
+
+    elif args.mode in (modes.COMPLETE_GEOMETRY, modes.COMPLETE_SEMANTIC):
+        guided = args.mode == modes.COMPLETE_SEMANTIC
         variants = [{"key": "observed", "label": "LiDAR scan",
                      "hint": "a single sweep, voxelised"},
                     {"key": "completed", "label": "Completed",
-                     "hint": "the model's completion"}]
+                     "hint": ("completed from the scan, labels included" if guided
+                              else "layout completed from the scan; labels sampled")},
+                    {"key": "truth", "label": "Ground truth",
+                     "hint": "SemanticKITTI SSC labels; invalid voxels shown empty"}]
         for spec in args.frames:
             seq, scan, labels = load_frame(spec)
             sid = f"{seq}_{scan}"
             occ = observed_state(labels)
             seen = float((occ != -1).mean())
+            truth, invalid = load_truth(spec)
             print(f"{spec}: {int((labels > 0).sum()):,} hits, "
-                  f"{seen:.0%} of the volume observed")
+                  f"{seen:.0%} of the volume observed, "
+                  f"{invalid:.0%} of the ground truth invalid")
             torch.manual_seed(args.seed)
             z_known, mask = conditioning(occ)
             done = synthesize(z_known, mask, vae, sem, struct, device,
-                              args.steps, args.resample)
+                              args.steps, args.resample, latent_dim, latent_scale,
+                              guidance=(dict(labels=labels, known=occ != -1,
+                                             **guidance_opts(args))
+                                        if guided else None),
+                              sampler=args.semantic_sampler, verbose=guided)
+
+            # Report against the scan itself, not the ground truth: this is the
+            # number that showed the semantic stage was ignoring the observation.
+            hit = labels > 0
+            kept = done[hit] > 0
+            agree = (done[hit] == labels[hit])[kept]
+            fid = {"scan_hits": int(hit.sum()),
+                   "hits_kept": round(float(kept.mean()), 4),
+                   "hits_relabelled_same": round(float(agree.mean()), 4)
+                                            if kept.any() else None}
+            print(f"  of the scan's {fid['scan_hits']:,} hits: "
+                  f"{fid['hits_kept']:.3f} still occupied, "
+                  f"{fid['hits_relabelled_same']:.3f} keep their label")
+
             scenes.append({
                 "id": sid, "scene": f"sequence {seq}, scan {scan}",
-                "occupied_voxels": int((labels > 0).sum()),
-                "classes": int(len(np.unique(labels[labels > 0]))),
+                "observation_fidelity": fid,
+                "occupied_voxels": int((truth > 0).sum()),
+                "classes": int(len(np.unique(truth[truth > 0]))),
                 "volume_observed": round(seen, 4),
+                "volume_invalid": round(invalid, 4),
                 "variants": {"observed": emit(sid, "observed", labels),
-                             "completed": emit(sid, "completed", done)},
+                             "completed": emit(sid, "completed", done),
+                             "truth": emit(sid, "truth", truth)},
             })
+
+    else:
+        sys.exit(f"--mode {args.mode} is not wired into this exporter")
 
     manifest = {
         "dataset": "semantickitti",
@@ -395,8 +794,17 @@ def main(argv=None):
         "palette": palette,
         "default_cut": 1.0,        # outdoor scenes are flat; nothing to cut away
         "variants": variants,
-        "sampling": {"steps": args.steps, "repaint_resample": args.resample,
-                     "seed": args.seed},
+        "sampling": {"structure": args.structure,
+                     "ddpm_resample": args.ddpm_resample if args.structure == "ddpm" else None,
+                     "steps": args.steps, "repaint_resample": args.resample,
+                     "seed": args.seed, "weights": args.config_dir or "shipped",
+                     "latent_scale": latent_scale,
+                     "mode": args.mode,
+                     "mode_number": modes.MODES[args.mode].number,
+                     **{f"guidance_{k}": v
+                        for k, v in guidance_opts(args).items()},
+                     "structure_stage": modes.stages("outdoor", args.mode)[0],
+                     "semantic_stage": modes.stages("outdoor", args.mode)[1]},
         "scenes": scenes,
     }
     with open(os.path.join(args.out, "manifest.json"), "w") as f:

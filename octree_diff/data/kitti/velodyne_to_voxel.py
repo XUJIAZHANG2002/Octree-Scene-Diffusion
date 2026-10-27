@@ -419,10 +419,16 @@ def velodene_to_voxel(
     raw_label_path = os.path.join(data_path, 'sequences', sequence, 'labels', f'{scan_index}.label')
     yaml_path = os.path.join(data_path, 'semantic-kitti.yaml')
     print(f"Loading data for sequence {sequence}, scan {scan_index}...")
-    
 
-    if not all(os.path.exists(p) for p in [raw_lidar_path, raw_label_path, yaml_path]):
-        print("Error: Missing dataset files. Please check your data_path and file structure.")
+    missing = [p for p in [raw_lidar_path, raw_label_path, yaml_path]
+               if not os.path.exists(p)]
+    if missing:
+        # Printing and carrying on only moved the failure four lines down, to a
+        # bare FileNotFoundError from np.fromfile. Not every sequence is fully
+        # labelled -- 08 ships 173 of its frames -- so this is reachable.
+        raise FileNotFoundError(
+            "missing SemanticKITTI files for sequence "
+            f"{sequence}, scan {scan_index}: " + ", ".join(missing))
         
     with open(yaml_path, 'r') as stream:
         semkittiyaml = yaml.safe_load(stream)

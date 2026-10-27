@@ -27,12 +27,26 @@ def train(config_dir=None, device=None):
     unet_model = build_semantic_unet(v_cfg, d_cfg["unet"], device)
 
     optimizer = torch.optim.AdamW(unet_model.parameters(), lr=t_cfg["lr"])
-    loader = get_dataloader(t_cfg["data_dir"], batch_size=1)
+
+    # Indoor reads prepared .pt patches; outdoor decodes SemanticKITTI voxel
+    # labels on the fly. Matches train_sem_vae, so the diffusion model sees the
+    # same frames the VAE was fitted on.
+    if t_cfg.get("dataset", "replica_patches") == "kitti_ssc":
+        from octree_diff.data.kitti.ssc_dataset import TRAIN_SEQUENCES, get_ssc_dataloader
+        loader = get_ssc_dataloader(t_cfg["data_dir"], batch_size=1,
+                                    stride=t_cfg.get("stride", 5),
+                                    sequences=TRAIN_SEQUENCES)
+    else:
+        loader = get_dataloader(t_cfg["data_dir"], batch_size=1)
     patch_size = v_cfg["patch_size"]
 
     def encode(vox):
-        """Voxel labels -> (octree latents, dual octree)."""
-        octree = build_semantic_octree(vox, patch_size, v_cfg["depth_in"],
+        """Voxel labels -> (octree latents, dual octree).
+
+        `clamp(min=0)` because outdoor labels carry -1 on `.invalid` voxels and
+        the octree builder treats any non-zero label as occupied.
+        """
+        octree = build_semantic_octree(vox.clamp(min=0), patch_size, v_cfg["depth_in"],
                                        v_cfg["full_depth"], device)
         _, mu, doctree = vae.extract_code(octree)
         return mu.to(device), doctree
@@ -56,6 +70,24 @@ def train(config_dir=None, device=None):
     accum = t_cfg["accum_steps"]
     total_steps = t_cfg["epochs"] * len(loader) // accum
     step = 0
+
+    # Continue from an existing checkpoint instead of restarting. The raw
+    # (non-EMA) weights are the ones to resume from; the EMA copy is a trailing
+    # average and resuming from it would collapse the averaging window. Warmup
+    # is skipped because the model is already warm, and the cosine schedule runs
+    # over the new span only.
+    if t_cfg.get("resume"):
+        raw = t_cfg["checkpoint_path"].replace(".pt", "_raw.pt")
+        if not os.path.exists(raw):
+            raise FileNotFoundError(f"resume requested but {raw} is missing")
+        unet_model.load_state_dict(torch.load(raw, map_location=device))
+        if os.path.exists(t_cfg["checkpoint_path"]):
+            ema.load_state_dict(torch.load(t_cfg["checkpoint_path"], map_location=device))
+            print(f"resuming: weights from {raw}, EMA from {t_cfg['checkpoint_path']}")
+        else:
+            print(f"resuming: weights from {raw}, EMA reinitialised")
+        t_cfg = dict(t_cfg)
+        t_cfg["warmup_steps"] = 0
 
     print(f"{len(loader)} samples/epoch x {t_cfg['epochs']} epochs, "
           f"accum {accum} -> {total_steps} optimiser steps")
