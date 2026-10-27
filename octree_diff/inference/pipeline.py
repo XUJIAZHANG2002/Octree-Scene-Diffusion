@@ -28,15 +28,14 @@ import torch
 import torch.nn.functional as F
 import yaml
 
-from octree_diff.models.semantic.graph_unet_hr import UNet3DModel
 from octree_diff.models.semantic.dual_octree import DualOctree
-from octree_diff.models.semantic.graph_sem_vae import GraphVAE
-from octree_diff.models.structure.structure_vae import VoxelVAE
-from octree_diff.models.structure.unet_3d import StructureUNet
+from octree_diff.models.factory import (build_semantic_unet, build_semantic_vae,
+                                        build_structure_unet, build_structure_vae)
 from octree_diff.config import CONFIG_DIR, load_config
 from octree_diff.training.latent_scale import load_latent_scale
 from octree_diff.diffusion.sampling import (
-    ddim_inpaint_dense, ddim_inpaint_graph, ddim_sample_dense, ddim_sample_graph,
+    ddim_guided_graph, ddim_inpaint_dense, ddim_inpaint_graph,
+    ddim_sample_dense, ddim_sample_graph,
 )
 from octree_diff.octree.util_dualoctree import octree2split_small, split2octree_small
 from octree_diff.octree.util_octree_stuff import (
@@ -59,6 +58,14 @@ DEPTH = _GEOM["depth_in"]
 GRID = (128, 128, 64)     # label patch shape produced by the Replica data prep
 OCTREE_FULL_DEPTH = 4     # split representation; unrelated to the VAE's full_depth
 SPLIT_DEPTH = 4
+
+# Decoder-space guidance for the "guided" semantic stage -- the settings the
+# outdoor completion landed on (docs/outdoor-semantic-conditioning.md):
+# weight is the fraction of x0's norm moved per step, `inner` the guidance
+# steps per DDIM step, free_weight 0 asks for the observed labels only (the
+# structure stage already holds occupancy), and guidance fades out by t=0.20
+# so the last DDIM steps re-cohere what it forced.
+GUIDANCE = dict(weight=0.15, inner=3, free_weight=0.0, stop_t=0.20, ramp=0.15)
 
 
 # --------------------------------------------------------------------------
@@ -106,6 +113,21 @@ def build_doctree(octree):
     doctree = DualOctree(octree)
     doctree.post_processing_for_docnn()
     return doctree
+
+
+def node_targets(labels, known, octree):
+    """Per-node (label, observed) patches, in the decoder's own row order.
+
+    `reconstruct_voxel_from_patch` reads the decoder's logits by
+    `octree.xyzb(DEPTH, nempty=False)`, so indexing the patched volumes the same
+    way lines the guidance targets up with them row for row. The indoor twin of
+    `guidance_targets` in `scripts/export_web_scenes_kitti.py`.
+    """
+    tl = voxel_to_patch(labels.long().unsqueeze(0), PATCH_SIZE)[0]       # [64,64,64,P,P]
+    tk = voxel_to_patch(known.long().unsqueeze(0), PATCH_SIZE)[0].bool()
+    x, y, z, _ = octree.xyzb(DEPTH, nempty=False)
+    x, y, z = x.long(), y.long(), z.long()
+    return tl[x, y, z], tk[x, y, z]
 
 
 def voxel_mask_to_latent_mask(mask_vox):
@@ -226,48 +248,33 @@ class IndoorPipeline:
             print(f"  loaded {name} from {ckpt}")
         return self._cache[name]
 
+    # All four go through octree_diff.models.factory. These used to call the
+    # constructors directly, which is the drift the factory exists to prevent:
+    # the semantic VAE was built without patch_size or width_mult, so any config
+    # setting them was silently ignored and the checkpoint failed to load.
     @property
     def str_vae(self):
-        c = self.str_vae_cfg["model"]
         return self._load("structure_vae",
-                          lambda: VoxelVAE(z_channels=c["z_channels"],
-                                           base=c["base_channels"],
-                                           in_ch=c["in_channels"]),
+                          lambda: build_structure_vae(self.str_vae_cfg["model"]),
                           self.str_vae_cfg["training"]["checkpoint_path"])
 
     @property
     def str_unet(self):
-        u = self.str_diff_cfg["unet"]
         return self._load("structure_diffusion",
-                          lambda: StructureUNet(in_ch=u["in_channels"], base_ch=u["base_ch"],
-                                                time_emb_dim=u["time_emb_dim"]),
+                          lambda: build_structure_unet(self.str_diff_cfg["unet"]),
                           self.str_diff_cfg["training"]["checkpoint_path"])
 
     @property
     def sem_vae(self):
-        m = self.sem_vae_cfg["model"]
         return self._load("semantic_vae",
-                          lambda: GraphVAE(
-                              depth=m["depth_in"], channel_in=m["in_channels"],
-                              nout=m["nout"], full_depth=m["full_depth"],
-                              depth_stop=m["depth_stop"], depth_out=m["depth_in"],
-                              latent_dim=m["latent_dim"],
-                              num_classes=m["total_classes"],
-                              resblk_num=m["resblk_num"]),
+                          lambda: build_semantic_vae(self.sem_vae_cfg["model"]),
                           self.sem_vae_cfg["training"]["checkpoint_path"])
 
     @property
     def sem_unet(self):
-        m, u = self.sem_vae_cfg["model"], self.sem_diff_cfg["unet"]
         return self._load("semantic_diffusion",
-                          lambda: UNet3DModel(
-                              image_size=u["image_size"], input_depth=m["depth_in"],
-                              full_depth=m["full_depth"], in_channels=m["latent_dim"],
-                              model_channels=u["model_channels"],
-                              lr_model_channels=u["lr_model_channels"],
-                              out_channels=m["latent_dim"],
-                              num_res_blocks=u["num_res_blocks"],
-                              channel_mult=u["channel_mult"]),
+                          lambda: build_semantic_unet(self.sem_vae_cfg["model"],
+                                                      self.sem_diff_cfg["unet"]),
                           self.sem_diff_cfg["training"]["checkpoint_path"])
 
     # -- structure ---------------------------------------------------------
@@ -283,11 +290,14 @@ class IndoorPipeline:
                           resample=1, best_of=1, return_score=False):
         """Complete the layout, optionally keeping the best of several samples.
 
-        Roughly one draw in twenty degrades badly (measured: layout IoU 0.54 where
-        the other seeds all give 0.94). Those draws also disagree with the region
-        the sensor actually observed — known-region agreement drops from ~0.98 to
-        ~0.89 — so they can be rejected without any ground truth. `best_of > 1`
-        samples repeatedly and keeps the candidate that best matches the input.
+        Single layouts often fail to reproduce the observed region: the decoder
+        mixes generated neighbour latents into cells that are only partly
+        observed, which is most of them for a sensor view. On the ten sample
+        scenes 1 to 18 layouts in 24 keep >=98% of the observed occupied voxels;
+        the rest keep 67-97%. Agreement with the observed cells tracks this
+        closely (correlation 0.96-1.00 per scene) and needs no ground truth, so
+        `best_of > 1` samples repeatedly and keeps the candidate that agrees
+        best. The best of 24 kept >=99.5% on every scene; use 64 for completion.
         """
         split_big_known = split_big_known.to(self.device)
         mu, _ = self.str_vae.encode(split_big_known)
@@ -340,6 +350,42 @@ class IndoorPipeline:
         z = ddim_inpaint_graph(self.sem_unet, doctree, z_known, node_mask,
                                steps=steps, device=self.device, eta=eta,
                                resample=resample)
+        return self._decode_semantics(z, doctree, octree)
+
+    def guided_semantics(self, octree, labels, known, steps, eta=0.0, guidance=None):
+        """Complete the semantics with the observation applied as guidance.
+
+        Pinning (`inpaint_semantics`) holds observed nodes' latents at an
+        encoding of the partial labels, which only works if a node's latent is
+        a function of its own patch. It is not: the graph encoder's receptive
+        field reaches unobserved neighbours, which go in as "empty". On sensor-
+        frustum masks the observed region's labels came back 0.60-0.93. Guidance
+        never touches the encoder -- it measures disagreement at the observed
+        voxels in decoded label space and backpropagates into the latent.
+        """
+        g = dict(GUIDANCE)
+        g.update(guidance or {})
+        octree = octree.to(self.device)
+        doctree = build_doctree(octree)
+        target, observed = node_targets(labels.to(self.device), known.to(self.device), octree)
+        weight = observed.float()
+        if g["free_weight"] != 1.0:
+            weight = torch.where(target == 0, weight * g["free_weight"], weight)
+
+        # the backward pass should reach only the latent
+        for prm in self.sem_vae.parameters():
+            prm.requires_grad_(False)
+
+        def decode_logits(code):
+            out = self.sem_vae.decode_code(code / self.sem_scale, doctree,
+                                           update_octree=False, pos=None)
+            return out["sem_voxs"][DEPTH]
+
+        z = ddim_guided_graph(self.sem_unet, doctree, decode_logits, target, weight,
+                              n_nodes=doctree.total_num, latent_dim=self.latent_dim,
+                              steps=steps, device=self.device, eta=eta,
+                              weight=g["weight"], inner=g["inner"],
+                              stop_t=g["stop_t"], ramp=g["ramp"])
         return self._decode_semantics(z, doctree, octree)
 
     def _decode_semantics(self, z, doctree, octree):
@@ -399,11 +445,22 @@ def run_inpaint(pipe, args, out_dir):
                                        args.eta, args.repaint_resample, args.best_of)
 
     octree = split_big_to_octree(split_big, pipe.sem_full_depth)
-    doctree = build_doctree(octree)
-    node_mask = voxel_mask_to_node_mask(known, octree, doctree)
 
-    out_labels = pipe.inpaint_semantics(octree, known_labels, node_mask, args.steps,
-                                        args.eta, args.repaint_resample)
+    if getattr(args, "semantic_stage", "guided") == "sampled":
+        # Mode 3: the observation pins the layout only. Kept as an explicit
+        # option rather than a side effect, because an unconditioned semantic
+        # stage also deletes observed voxels -- label 0 is free -- and a figure
+        # produced this way must not be captioned as semantic completion.
+        out_labels = pipe.sample_semantics(octree, args.steps, args.eta)
+    elif getattr(args, "semantic_stage", "guided") == "guided":
+        out_labels = pipe.guided_semantics(octree, known_labels, known,
+                                           args.steps, args.eta)
+    else:
+        doctree = build_doctree(octree)
+        node_mask = voxel_mask_to_node_mask(known, octree, doctree)
+        out_labels = pipe.inpaint_semantics(octree, known_labels, node_mask,
+                                            args.steps, args.eta,
+                                            args.repaint_resample)
 
     torch.save(out_labels.cpu(), os.path.join(out_dir, "labels_completed.pt"))
     torch.save(split_big_to_occupancy(split_big).cpu(),
@@ -435,10 +492,17 @@ def run_outpaint(pipe, args, out_dir):
                                            args.eta, args.repaint_resample, args.best_of)
 
         octree = split_big_to_octree(split_big, pipe.sem_full_depth)
-        doctree = build_doctree(octree)
-        node_mask = voxel_mask_to_node_mask(known, octree, doctree)
-        out_labels = pipe.inpaint_semantics(octree, window, node_mask, args.steps,
-                                            args.eta, args.repaint_resample)
+        if getattr(args, "semantic_stage", "guided") == "sampled":
+            out_labels = pipe.sample_semantics(octree, args.steps, args.eta)
+        elif getattr(args, "semantic_stage", "guided") == "guided":
+            out_labels = pipe.guided_semantics(octree, window, known,
+                                               args.steps, args.eta)
+        else:
+            doctree = build_doctree(octree)
+            node_mask = voxel_mask_to_node_mask(known, octree, doctree)
+            out_labels = pipe.inpaint_semantics(octree, window, node_mask,
+                                                args.steps, args.eta,
+                                                args.repaint_resample)
 
         scene = torch.cat([scene, out_labels[half:]], dim=0)
         print(f"  step {k}: scene now {tuple(scene.shape)}  ({time.time() - t0:.1f}s)")
@@ -452,6 +516,14 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--mode", required=True, choices=["generate", "inpaint", "outpaint"])
+    p.add_argument("--semantic-stage", dest="semantic_stage", default="guided",
+                   choices=["pinned", "guided", "sampled"],
+                   help="inpaint/outpaint: 'guided' completes the semantics from "
+                        "the observation by decoder-space guidance at the observed "
+                        "voxels (mode 4/5); 'pinned' by holding observed latents, "
+                        "which keeps fewer observed labels (0.59-0.82 vs 0.94-1.00 "
+                        "on the sample scenes with --best-of 64); 'sampled' draws them from the "
+                        "prior and completes geometry only (mode 3)")
     p.add_argument("--stages", default="both", choices=["structure", "semantic", "both"],
                    help="generate only: which stages to run")
     p.add_argument("--structure-from", help="generate only: reuse a layout from this .pt")
@@ -466,8 +538,8 @@ def main():
                    help="RePaint jumps per step; >1 costs that many model evals")
     p.add_argument("--best-of", type=int, default=1,
                    help="sample the layout this many times and keep the one that best "
-                        "agrees with the observed region; rejects the ~5%% of draws "
-                        "that degrade")
+                        "agrees with the observed region; sensor-view masks need a large "
+                        "pool (64): most single layouts drop 3-33%% of the view")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default="out")
     p.add_argument("--device", default="cuda")

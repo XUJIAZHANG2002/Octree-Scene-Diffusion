@@ -25,17 +25,33 @@ import torch
 import tqdm
 
 
-def _normalise(w, present, clamp=None):
-    """Mean-normalise over present classes, then optionally cap the range.
+def _normalise(w, present, clamp=None, max_ratio=None):
+    """Mean-normalise over present classes, then optionally cap the spread.
 
-    Without a cap a handful of classes with a few dozen voxels in the entire
-    training set get weights in the thousands and dominate the gradient.
+    Two caps, because they do different things:
+
+    `clamp` is the original symmetric cap, `[1/clamp, clamp]`. It is the wrong
+    tool for this distribution and is off by default. After mean-normalising,
+    Replica's common classes land at 0.01-0.10 -- all *below* 1/10 -- so a
+    symmetric clamp of 10 raises floor, wall and ceiling onto the same 0.1 floor
+    and destroys the ordering among them. That is the "flattens the top six
+    classes" failure recorded in configs/CHANGELOG.md.
+
+    `max_ratio` caps only the tail: no class may exceed `max_ratio` times the
+    median present weight. The head is untouched. This is what the skew actually
+    calls for -- 14 Replica classes hold 0.017% of the voxels but 61% of the
+    summed weight, and the rarest (81 voxels in the whole training set) cannot
+    be learned from that no matter how hard it is weighted.
     """
     w = w.clone()
     w[~present] = 0.0
     w[present] = w[present] / w[present].mean()
     if clamp is not None and clamp > 0:
         w[present] = w[present].clamp(1.0 / clamp, clamp)
+        w[present] = w[present] / w[present].mean()
+    if max_ratio is not None and max_ratio > 0:
+        cap = w[present].median() * max_ratio
+        w[present] = w[present].clamp(max=cap)
         w[present] = w[present] / w[present].mean()
     return w
 
@@ -83,7 +99,8 @@ def _count_loss(files, src, num_classes, patch_size, depth, full_depth, device):
     return counts
 
 
-def compute(src, num_classes, include_free_space, basis="loss", clamp=10.0,
+def compute(src, num_classes, include_free_space, basis="loss", clamp=0.0,
+            max_ratio=0.0, min_count=0,
             patch_size=2, depth=6, full_depth=3, device="cuda"):
     files = sorted(f for f in os.listdir(src) if f.endswith(".pt"))
     if not files:
@@ -95,30 +112,41 @@ def compute(src, num_classes, include_free_space, basis="loss", clamp=10.0,
         counts = _count_volume(files, src, num_classes)
 
     stats = {"counts": counts, "num_classes": num_classes, "num_patches": len(files),
-             "basis": basis, "clamp": clamp}
+             "basis": basis, "clamp": clamp, "max_ratio": max_ratio,
+             "min_count": min_count}
 
     tally = counts.clone()
     if not include_free_space:
         # Class 0 is free space and dominates by ~2 orders of magnitude; it is
         # still counted, just excluded from the weighting statistics.
         tally[0] = 0
-    present = tally > 0
+    # Classes below `min_count` are excluded from the loss entirely. A class
+    # with a few dozen voxels in the whole training set cannot be learned, and
+    # inverse-frequency weighting hands exactly those classes the largest
+    # weights -- so they contribute noise, not signal. cross_entropy with a
+    # zero weight drops them from both numerator and denominator.
+    present = tally >= max(int(min_count), 1)
+    if min_count:
+        dropped = int(((tally > 0) & ~present).sum())
+        held = float(tally[(tally > 0) & ~present].sum()) / float(tally.sum())
+        print(f"min_count={min_count}: dropping {dropped} classes "
+              f"holding {held * 100:.4f}% of counted voxels")
 
     freq = tally.double() / tally.sum().double()
     stats["freq"] = freq.float()
 
     inv = torch.zeros(num_classes, dtype=torch.double)
     inv[present] = 1.0 / freq[present]
-    stats["weights_inv"] = _normalise(inv, present, clamp).float()
+    stats["weights_inv"] = _normalise(inv, present, clamp, max_ratio).float()
 
     inv_sqrt = torch.zeros(num_classes, dtype=torch.double)
     inv_sqrt[present] = 1.0 / freq[present].sqrt()
-    stats["weights_inv_sqrt"] = _normalise(inv_sqrt, present, clamp).float()
+    stats["weights_inv_sqrt"] = _normalise(inv_sqrt, present, clamp, max_ratio).float()
 
     beta = 0.9999
     enet = torch.zeros(num_classes, dtype=torch.double)
     enet[present] = (1.0 - beta) / (1.0 - beta ** tally[present].double())
-    stats["weights_enet"] = _normalise(enet, present, clamp).float()
+    stats["weights_enet"] = _normalise(enet, present, clamp, max_ratio).float()
     stats["enet_beta"] = beta
     stats["include_free_space"] = include_free_space
 
@@ -133,15 +161,24 @@ def main():
     parser.add_argument("--basis", default="loss", choices=["loss", "volume"],
                         help="'loss' counts only what compute_semantic_loss sees "
                              "(inside occupied octree nodes); 'volume' counts every voxel")
-    parser.add_argument("--clamp", type=float, default=10.0,
-                        help="cap weights to [1/clamp, clamp] after normalising; 0 disables")
+    parser.add_argument("--clamp", type=float, default=0.0,
+                        help="symmetric cap to [1/clamp, clamp]; 0 disables. Off by "
+                             "default -- it flattens the head on this distribution, "
+                             "see _normalise")
+    parser.add_argument("--max-ratio", dest="max_ratio", type=float, default=0.0,
+                        help="cap any weight at max_ratio x the median present "
+                             "weight; 0 disables. Caps the tail only")
+    parser.add_argument("--min-count", dest="min_count", type=int, default=0,
+                        help="classes with fewer than this many voxels get weight "
+                             "0 and are excluded from the loss; 0 keeps all")
     parser.add_argument("--no_free_space", action="store_true",
                         help="exclude class 0 from the weighting (gives it weight 0 — "
                              "only sensible on the 'volume' basis)")
     args = parser.parse_args()
 
     stats = compute(args.src, args.num_classes, not args.no_free_space,
-                    basis=args.basis, clamp=args.clamp)
+                    basis=args.basis, clamp=args.clamp, max_ratio=args.max_ratio,
+                    min_count=args.min_count)
     torch.save(stats, args.out)
 
     counts = stats["counts"]

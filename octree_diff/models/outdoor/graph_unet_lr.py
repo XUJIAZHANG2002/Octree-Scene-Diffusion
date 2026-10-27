@@ -28,6 +28,23 @@ from octree_diff.models.common.modules import (
 )
 
 
+def get_timestep_embedding(timesteps, dim, max_period=10000):
+    """Fixed cos/sin embedding of integer DDPM steps, [B] -> [B, dim].
+
+    Used by the `timestep_repr="ddpm"` structure model, whose time input is an
+    integer step in [0, T-1] rather than a continuous t in [0, 1].
+    """
+    assert timesteps.ndim == 1, f"timesteps should be shape [B], got {timesteps.shape}"
+    half = dim // 2
+    freqs = torch.exp(-math.log(max_period)
+                      * torch.arange(0, half, device=timesteps.device, dtype=torch.float32) / half)
+    args = timesteps.to(torch.float32)[:, None] * freqs[None, :]
+    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    if dim % 2 == 1:
+        emb = F.pad(emb, (0, 1))
+    return emb
+
+
 class UNet3DModel(nn.Module):
     """
     The full UNet model with attention and timestep embedding.
@@ -75,9 +92,17 @@ class UNet3DModel(nn.Module):
         use_text_condition=False,
         context_dim=None,  # custom transformer support
         n_embed=None,  # custom support for prediction of discrete ids into codebook of first stage vq model
+        timestep_repr="continuous",
+        T=1000,
         **kwargs,
     ):
         super().__init__()
+        # "continuous": t in [0, 1] through a learned sinusoid (the logSNR-cosine
+        # models). "ddpm": integer steps in [0, T-1] through a fixed sinusoid --
+        # the 1000-step structure model the paper's outdoor FID notebook used.
+        assert timestep_repr in ("continuous", "ddpm")
+        self.timestep_repr = timestep_repr
+        self.T = int(T)
         # import pdb; pdb.set_trace()
         self.full_depth = full_depth
         self.in_channels = in_split_channels
@@ -100,10 +125,15 @@ class UNet3DModel(nn.Module):
 
         time_embed_dim = self.model_channels * 4
 
-        self.time_pos_emb = LearnedSinusoidalPosEmb(self.model_channels)
+        if self.timestep_repr == "continuous":
+            self.time_pos_emb = LearnedSinusoidalPosEmb(self.model_channels)
+            time_in_dim = self.model_channels + 1     # the learned sinusoid appends t
+        else:
+            self.time_pos_emb = None
+            time_in_dim = self.model_channels
 
         self.time_emb = nn.Sequential(
-            nn.Linear(self.model_channels + 1, time_embed_dim),
+            nn.Linear(time_in_dim, time_embed_dim),
             activation_function(),
             nn.Linear(time_embed_dim, time_embed_dim),
         )
@@ -261,7 +291,10 @@ class UNet3DModel(nn.Module):
 
         h = []
 
-        emb = self.time_emb(self.time_pos_emb(timesteps))
+        if self.timestep_repr == "ddpm":
+            emb = self.time_emb(get_timestep_embedding(timesteps.long(), self.model_channels))
+        else:
+            emb = self.time_emb(self.time_pos_emb(timesteps))
 
         if self.num_classes is not None:
             assert label.shape == (x.shape[0],)

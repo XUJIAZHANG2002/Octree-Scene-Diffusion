@@ -5,7 +5,7 @@ a flag none of them parsed. Everything here runs in-process.
 
     python -m octree_diff.cli train    --stage sem_vae --device cuda
     python -m octree_diff.cli generate --num-samples 8 --out out/gen
-    python -m octree_diff.cli complete --input scene.pt --known-mask known.pt --best-of 3
+    python -m octree_diff.cli complete --input scene.pt --known-mask known.pt --best-of 64
     python -m octree_diff.cli extend   --input scene.pt --steps-out 4
     python -m octree_diff.cli verify
 
@@ -36,8 +36,10 @@ def _add_sampling(p):
     p.add_argument("--repaint-resample", "--repaint_resample", dest="repaint_resample",
                    type=int, default=1, help="RePaint jumps per step")
     p.add_argument("--best-of", "--best_of", dest="best_of", type=int, default=1,
-                   help="sample the layout N times, keep the one that best agrees with "
-                        "the observed region; rejects the ~1-in-20 draw that degrades")
+                   help="keep the best of N layouts by agreement with the observed "
+                        "region. Sensor-view masks need a large pool: on the sample "
+                        "scenes only 1 to 18 single layouts in 24 keep the view, the "
+                        "rest drop 3-33%% of it; use 64 to complete, 3 to extend")
 
 
 def build_parser():

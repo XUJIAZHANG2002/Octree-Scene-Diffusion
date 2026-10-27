@@ -1,0 +1,29 @@
+vae_ref:
+  checkpoint: "saved_model/v2/vae_sem_v2.pt"
+
+# Scaled with the VAE. The shipped UNet is 2.45M parameters against a 0.68M VAE;
+# the retrained VAE is 11M with a 32-dim latent (was 16), so the diffusion model
+# now has a richer and twice-as-wide target to fit. 13.08M at 7.6 GiB peak keeps
+# the two stages proportionate.
+#
+# Unlike the VAE settings, this was NOT established by an A/B -- evaluating a
+# diffusion model requires full sampling and decoding, which a 3-epoch run
+# cannot show. It is a judgement call sized against the VAE.
+unet:
+  image_size: 16
+  model_channels: 128
+  lr_model_channels: 256
+  num_res_blocks: [2, 2, 2]
+  channel_mult: [1, 2]
+
+training:
+  lr: 5.0e-5           # halved for the continuation
+  epochs: 120          # continuing from the first 60; see resume below
+  accum_steps: 8       # effective batch 8
+  warmup_steps: 500
+  ema_decay: 0.999
+  grad_clip: 1.0
+  resume: true         # continues saved_model/v2/unet_sem_v2_raw.pt rather than restarting
+  latent_scale: 1.651021933697025   # pinned: the first 60 epochs trained at this
+  checkpoint_path: "saved_model/v2/unet_sem_v2.pt"
+  data_dir: "data/patches_128x128x64_s16"

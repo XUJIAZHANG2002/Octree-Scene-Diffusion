@@ -1,0 +1,39 @@
+# Outdoor (SemanticKITTI) semantic VAE, retrained.
+#
+# Capacity and KL weight carry over from the indoor sweeps in out/ab/results.json,
+# which found capacity to be the dominant factor (held-out reconstruction
+# 0.9465 -> 0.9948 micro going width 1 -> 8) and 1e-3 to be the KL knee.
+#
+# Outdoor-specific:
+#   patch_size 4     256x256x32 at patch 4 gives a 64x64x32 grid, padded to cubic
+#                    in build_semantic_octree
+#   total_classes 21 SemanticKITTI learning space is 0..19, plus one spare
+#   full_depth 3     as the KITTI notebooks build it
+#   no min_count     KITTI's class distribution is far gentler than Replica's:
+#                    71:1 spread and the rarest class still has 8,658 voxels per
+#                    300 frames, so there is no unlearnable tail to drop
+model:
+  depth_in: 6
+  depth_stop: 6
+  full_depth: 3
+  latent_dim: 32
+  total_classes: 21
+  resblk_num: 3
+  in_channels: 32
+  nout: 2
+  patch_size: 4
+  width_mult: 8.0
+
+training:
+  dataset: kitti_ssc
+  data_dir: "data/semantickitti/dataset"
+  stride: 5            # consecutive frames differ in ~4% of voxels
+  batch_size: 1
+  lr: 1.0e-4
+  epochs: 20
+  kl_weight: 1.0e-3
+  grad_clip: 1.0
+  class_weights: inv_sqrt
+  class_weights_file: "data/kitti_class_counts.pt"
+  val_n: 16
+  checkpoint_path: "saved_model/v2_outdoor/vae_sem_kitti.pt"
